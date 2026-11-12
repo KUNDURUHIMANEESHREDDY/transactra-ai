@@ -29,7 +29,7 @@ export default function App(){
   const instance=window.paypal.Buttons({
    style:{layout:"vertical",color:"gold",shape:"rect",label:"paypal",height:48},
    createOrder:async()=>{const r=await fetch("/api/orders",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...intent,rawPrompt:prompt})});const d=await r.json();if(!r.ok)throw Error(d.error||"Unable to create PayPal order");return d.orderId;},
-   onApprove:async(data:{orderID:string})=>{const r=await fetch("/api/orders/"+encodeURIComponent(data.orderID)+"/capture",{method:"POST"});const d=await r.json();if(!r.ok)throw Error(d.error||"PayPal capture failed");setNotice(d.status==="COMPLETED"?"Payment captured successfully in PayPal "+(paypalEnvironment==="live"?"Live":"Sandbox")+". ":"PayPal returned status: "+d.status);setIntent(null);setActivity(true);await refresh();},
+   onApprove:async(data:{orderID:string})=>{const r=await fetch("/api/orders/"+encodeURIComponent(data.orderID)+"/capture",{method:"POST"});const d=await r.json();if(!r.ok)throw Error(d.error||"PayPal capture failed");setNotice(d.status==="COMPLETED"?"Payment captured successfully in PayPal "+(paypalEnvironment==="live"?"Live":"Sandbox")+".":"PayPal returned status: "+d.status);setIntent(null);setActivity(true);await refresh();},
    onCancel:()=>setNotice("Checkout cancelled. No payment was captured."),
    onError:(e:unknown)=>setError(e instanceof Error?e.message:"PayPal checkout failed.")
   });
