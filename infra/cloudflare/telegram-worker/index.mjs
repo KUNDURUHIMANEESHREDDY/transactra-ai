@@ -47,6 +47,19 @@ async function sendText(env,m,text){
  if(Number.isInteger(m.message_id))payload.reply_parameters={message_id:m.message_id,allow_sending_without_reply:true};
  await tg(env,"sendMessage",payload);
 }
+async function sendPayPalConnect(env,m){
+ const apiBase=String(env.API_BASE_URL||"").replace(/\/+$/,"");
+ const secret=String(env.BACKEND_SHARED_SECRET||"");
+ const owner=String(env.TELEGRAM_OWNER_ID||"");
+ if(!apiBase||secret.length<32||!/^\d{1,20}$/.test(owner))throw Error("paypal_connect_not_configured");
+ const response=await fetch(apiBase+"/api/auth/paypal/connect",{method:"GET",headers:{"x-transactra-edge-secret":secret,"x-transactra-owner-id":owner,accept:"application/json"},redirect:"error",signal:AbortSignal.timeout(15000)});
+ const data=await response.json().catch(()=>null);
+ if(!response.ok||typeof data?.authorizeUrl!=="string")throw Error(typeof data?.error==="string"?data.error:"paypal_connect_failed");
+ const payload={chat_id:m.chat.id,text:"CONNECT PAYPAL · "+String(data.environment||"sandbox").toUpperCase()+"\n\nOpen PayPal's official authorization page. Sign in using your PayPal email or mobile number, then approve the requested access. Never send your password or one-time code in Telegram.",disable_web_page_preview:true,reply_markup:{inline_keyboard:[[{text:"Authorize PayPal",url:data.authorizeUrl}]]}};
+ if(m.business_connection_id)payload.business_connection_id=m.business_connection_id;
+ if(Number.isInteger(m.message_thread_id))payload.message_thread_id=m.message_thread_id;
+ await tg(env,"sendMessage",payload);
+}
 async function handleTelegramUpdate(update,env){
  const m=update?.business_message||update?.message;
  if(!m?.chat?.id||!m?.from?.id)return;
@@ -54,6 +67,11 @@ async function handleTelegramUpdate(update,env){
  if(m.chat.type!=="private"&&!m.business_connection_id)return;
  const text=typeof m.text==="string"?m.text.trim():"";
  if(!text)return;
+ if(/^(?:connect\s+(?:to\s+)?paypal|\/connect(?:@\w+)?|\/paypal(?:@\w+)?)$/i.test(text)){
+  try{await sendPayPalConnect(env,m);}
+  catch(e){console.error("paypal_connect_failed",String(e?.message||e));await sendText(env,m,"PayPal connection is not available right now. No account was linked. Check the API configuration and try again.");}
+  return;
+ }
  const command=text.match(/^\/(start|help|dashboard)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
  if(command){
   const name=command[1].toLowerCase(),arg=(command[2]||"").trim();
