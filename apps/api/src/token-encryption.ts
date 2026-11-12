@@ -1,14 +1,10 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
-const DEFAULT_SECRET = "transactra-default-oauth-token-encryption-secret-key-32b";
-
 function getEncryptionKey(customSecret?: string): Buffer {
-  const secret = customSecret ||
-    process.env.TOKEN_ENCRYPTION_SECRET ||
-    process.env.PAYPAL_CLIENT_SECRET ||
-    process.env.BACKEND_SHARED_SECRET ||
-    DEFAULT_SECRET;
-
+  const secret = customSecret || process.env.TOKEN_ENCRYPTION_SECRET;
+  if (!secret || Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("TOKEN_ENCRYPTION_SECRET must be configured with at least 32 bytes.");
+  }
   return createHash("sha256").update(secret).digest();
 }
 
