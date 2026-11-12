@@ -36,9 +36,11 @@ Node.js 22+, Docker Desktop or PostgreSQL 16+, a Telegram bot token and owner Te
 3. Copy `.env.example` to `.env`.
 4. Create a bot with [@BotFather](https://t.me/BotFather), then set `TELEGRAM_BOT_TOKEN`. Find your numeric user ID with [@userinfobot](https://t.me/userinfobot) and set `TELEGRAM_OWNER_ID`.
 5. Add PayPal Sandbox client ID and secret from https://developer.paypal.com/dashboard/applications/sandbox.
-6. Run `npm run dev:api`.
-7. In another terminal run `npm run start:telegram`.
-8. Open your bot in Telegram and send `/start`.
+6. Set `TOKEN_ENCRYPTION_SECRET` to at least 32 random bytes and set a separate strong `BACKEND_SHARED_SECRET` (shared by the API and Telegram bot; also the Cloudflare Worker when used).
+7. Set `API_BASE_URL` and `PAYPAL_REDIRECT_URI` to your API's HTTPS origin in production; use the local defaults only for local development.
+8. Run `npm run dev:api`.
+9. In another terminal run `npm run start:telegram`.
+10. Open your bot in Telegram, send `/start`, then send `connect paypal` to link your PayPal account.
 
 See [Telegram setup and operations](docs/TELEGRAM.md) for details. The optional web dashboard runs with `npm run dev` at http://localhost:5173.
 
@@ -61,6 +63,7 @@ Set `AI_BASE_URL`, `AI_API_KEY` and `AI_MODEL` to use an OpenAI-compatible `/cha
 - The bot accepts private messages only from `TELEGRAM_OWNER_ID`.
 - Never commit `.env`, the Telegram bot token, PayPal secret or model API key.
 - PayPal secrets stay on the API server; the bot never requests PayPal login credentials.
+- OAuth access/refresh tokens are encrypted with AES-256-GCM using the required `TOKEN_ENCRYPTION_SECRET`; there is no default-key fallback.
 - Use Sandbox credentials only. Do not enable live payments without a separate security and product review.
 - A Telegram bot token grants control of the bot. Keep it in a local environment file or production secret manager.
 
