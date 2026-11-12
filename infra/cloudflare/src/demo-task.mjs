@@ -44,33 +44,38 @@ export function buildDemoTaskEvents(taskId, prompt, startedAt = Date.now()) {
 }
 
 export async function runDemoTask(env, update, prompt) {
-  if (!env?.DB || typeof env.DB.prepare !== "function") {
-    throw new Error("demo_task_database_unavailable");
-  }
+  const safePrompt = String(prompt).slice(0, 4000);
   const updateId = String(update?.update_id ?? "");
-  const ownerId = String(env.TELEGRAM_OWNER_ID || "");
-  if (!/^\d{1,20}$/.test(updateId) || !/^\d{1,20}$/.test(ownerId)) {
-    throw new Error("demo_task_identity_invalid");
-  }
-  const taskId = "demo-tg-" + updateId;
-  const sourceEventId = "demo:" + updateId;
-  const now = new Date().toISOString();
-  await env.DB.prepare(
-    "INSERT OR IGNORE INTO tasks (id,source,source_event_id,owner_id,description,status,created_at,updated_at) VALUES (?,'telegram',?,?,?,'cancelled',?,?)"
-  ).bind(taskId, sourceEventId, ownerId, String(prompt).slice(0, 4000), now, now).run();
+  const ownerId = String(env?.TELEGRAM_OWNER_ID || "");
+  const taskId = /^\\d{1,20}$/.test(updateId) ? "demo-tg-" + updateId : "demo-tg-local";
 
-  const events = buildDemoTaskEvents(taskId, String(prompt).slice(0, 4000));
-  const statements = events.map((event) =>
-    env.DB.prepare("INSERT OR IGNORE INTO task_events (task_id,event_type,detail,created_at) VALUES (?,?,?,?)")
-      .bind(event.task_id, event.event_type, event.detail, event.created_at)
-  );
-  await env.DB.batch(statements);
+  // The deterministic demo reply never depends on the task service or D1.
+  // Dashboard event persistence is optional telemetry only.
+  if (/^\\d{1,20}$/.test(updateId) && /^\\d{1,20}$/.test(ownerId)
+      && typeof env?.DB?.prepare === "function") {
+    try {
+      const sourceEventId = "demo:" + updateId;
+      const now = new Date().toISOString();
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO tasks (id,source,source_event_id,owner_id,description,status,created_at,updated_at) VALUES (?,'telegram',?,?,?,'cancelled',?,?)"
+      ).bind(taskId, sourceEventId, ownerId, safePrompt, now, now).run();
+
+      const events = buildDemoTaskEvents(taskId, safePrompt);
+      const statements = events.map((event) =>
+        env.DB.prepare("INSERT OR IGNORE INTO task_events (task_id,event_type,detail,created_at) VALUES (?,?,?,?)")
+          .bind(event.task_id, event.event_type, event.detail, event.created_at)
+      );
+      await env.DB.batch(statements);
+    } catch (error) {
+      console.warn(JSON.stringify({ event: "demo_telemetry_unavailable", error: String(error?.message || error).slice(0, 160) }));
+    }
+  }
 
   return [
     "TRANSACTRA · MULTI-AGENT DEMO",
     "DEMO MODE — SCRIPTED EXECUTION",
     "",
-    "Task received: " + String(prompt).slice(0, 350),
+    "Task received: " + safePrompt.slice(0, 350),
     "",
     "The orchestrator decomposed the task and coordinated five specialist agents:",
     "1. Research Agent — prepared research themes.",
