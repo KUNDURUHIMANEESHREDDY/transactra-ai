@@ -3,10 +3,6 @@ import { randomUUID } from "node:crypto";
 const token = process.env.TELEGRAM_BOT_TOKEN || "";
 const ownerId = process.env.TELEGRAM_OWNER_ID || "";
 const apiBase = (process.env.API_BASE_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
-if (!token || !ownerId) {
-  console.error("Set TELEGRAM_BOT_TOKEN and TELEGRAM_OWNER_ID in .env before starting the Transactra Telegram bot.");
-  process.exit(1);
-}
 const telegramBase = "https://api.telegram.org/bot" + token;
 type Intent = { amount:string; currency:string; recipient:string; purpose:string; confidence:number; source:string };
 type Pending = { intent:Intent; rawPrompt:string; orderId?:string };
@@ -152,7 +148,14 @@ async function handleCallback(query:any) {
     } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not create the PayPal order."); }
   }
 }
+export async function processTelegramUpdate(update:any) {
+  if (!owner(update)) return;
+  if (update.message) await handleMessage(update.message);
+  else if (update.callback_query) await handleCallback(update.callback_query);
+}
+
 async function main() {
+  if (!token || !ownerId) throw new Error("Set TELEGRAM_BOT_TOKEN and TELEGRAM_OWNER_ID in .env before starting the Transactra Telegram bot.");
   if (process.env.TELEGRAM_CLEAR_WEBHOOK==="true") await tg("deleteWebhook",{drop_pending_updates:false});
   const webhook=await tg<{url?:string}>("getWebhookInfo");
   if (webhook.url) throw new Error("A Telegram webhook is already configured. Set TELEGRAM_CLEAR_WEBHOOK=true once to switch this bot to polling, then restart it.");
@@ -170,9 +173,7 @@ async function main() {
       const updates=await tg<any[]>("getUpdates",{offset,timeout:25,allowed_updates:["message","callback_query"]});
       for(const update of updates) {
         offset=update.update_id+1;
-        if (!owner(update)) continue;
-        if(update.message) await handleMessage(update.message);
-        else if(update.callback_query) await handleCallback(update.callback_query);
+        await processTelegramUpdate(update);
       }
     } catch(e) {
       console.error("Telegram polling error:",e instanceof Error?e.message:"unknown error");
@@ -180,4 +181,6 @@ async function main() {
     }
   }
 }
-void main().catch(e=>{console.error(e);process.exit(1);});
+if (process.argv[1] && /(?:^|[\\/])bot\.(?:ts|js|mjs)$/.test(process.argv[1])) {
+  void main().catch(e=>{console.error(e);process.exit(1);});
+}

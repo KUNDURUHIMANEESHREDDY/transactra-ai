@@ -45,3 +45,20 @@ The recipient in a natural-language request is a transaction label in this first
 - API base URL for the bot: `API_BASE_URL` (defaults to `http://127.0.0.1:8787`)
 
 For production, run the API and bot as supervised services on a trusted host, keep both bound to private/internal networking, use a managed PostgreSQL database, and store all secrets in the host's secret manager. Do not commit `.env`.
+
+## Production webhook via Cloudflare Worker
+
+The API exposes `POST /telegram/webhook` for the deployed Cloudflare gateway. The gateway authenticates Telegram's `X-Telegram-Bot-Api-Secret-Token`, then forwards the update with `X-Transactra-Edge-Secret`. The API validates that shared secret before passing the update to the same owner-allowlisted bot handlers used by polling.
+
+1. Deploy the Node API to a public HTTPS host and configure PostgreSQL, PayPal credentials, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_ID`, and a strong random `BACKEND_SHARED_SECRET`. Set `API_BASE_URL` to the API's own reachable base URL (for example, `http://127.0.0.1:8787` when the bot handler runs inside that API process).
+2. In Cloudflare Worker `transactra-telegram`, add these as encrypted secrets/variables:
+   - `API_ORIGIN`: public HTTPS base URL of the deployed Node API (no trailing slash).
+   - `BACKEND_SHARED_SECRET`: exactly the same random value configured on the API.
+   - `TELEGRAM_WEBHOOK_SECRET`: a separate random value (1–256 characters, using Telegram's allowed characters).
+3. Confirm `GET https://transactra-telegram.himaneeshreddyk.workers.dev/health` reports `backendConfigured: true`.
+4. Register the Telegram webhook URL `https://transactra-telegram.himaneeshreddyk.workers.dev/telegram/webhook` with Bot API `setWebhook`, supplying the separate `TELEGRAM_WEBHOOK_SECRET` as `secret_token` and allowed updates `message` and `callback_query`. Keep the bot token and secret out of source control and chat logs.
+5. Verify by sending `/start` to the bot, then check the Worker and API logs.
+
+Do not run `npm run start:telegram` while the webhook is registered: Telegram will not deliver updates through long polling at the same time. To return to polling, deliberately delete the webhook first (the poller has a one-time `TELEGRAM_CLEAR_WEBHOOK=true` switch).
+
+The API webhook endpoint is not publicly usable without the Worker-to-API shared secret. The Worker must be configured before registering Telegram's webhook. The Cloudflare Worker is only a gateway; it does not host the Node API or PostgreSQL database.

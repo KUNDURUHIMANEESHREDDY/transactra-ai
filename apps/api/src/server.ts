@@ -1,11 +1,13 @@
 import {createServer,type IncomingMessage,type ServerResponse} from "node:http";
-import {randomUUID} from "node:crypto";
+import {randomUUID,timingSafeEqual} from "node:crypto";
+import {processTelegramUpdate} from "../../telegram/src/bot.js";
 import {Pool} from "pg";
 const port=Number(process.env.PORT||8787),host=process.env.HOST||"127.0.0.1";
 const clientId=process.env.PAYPAL_CLIENT_ID||"",secret=process.env.PAYPAL_CLIENT_SECRET||"";
 const paypalBase=process.env.PAYPAL_ENV==="live"?"https://api-m.paypal.com":"https://api-m.sandbox.paypal.com";
 const db=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL}):null;
 const currencies=new Set(["USD","EUR","GBP","INR","CAD","AUD","SGD","JPY"]);
+const processedTelegramUpdates=new Set<number>();
 type Intent={amount:string;currency:string;recipient:string;purpose:string;confidence:number;source:"rules"|"model"};
 function send(res:ServerResponse,status:number,data:unknown){res.writeHead(status,{"Content-Type":"application/json","Cache-Control":"no-store"});res.end(JSON.stringify(data));}
 async function read(req:IncomingMessage){let raw="";for await(const c of req)raw+=c;if(raw.length>20000)throw Error("Request too large");return raw?JSON.parse(raw) as Record<string,unknown>:{};}
@@ -69,7 +71,18 @@ async function createWorkflowOrder(workflowId:string){
 async function route(req:IncomingMessage,res:ServerResponse){
  const url=new URL(req.url||"/","http://"+(req.headers.host||"localhost"));
  try{
-  if(req.method==="GET"&&url.pathname==="/api/health")return send(res,200,{status:"ok",database:Boolean(db),paypalConfigured:Boolean(clientId&&secret)});
+  if(req.method==="GET"&&url.pathname==="/api/health")return send(res,200,{status:"ok",database:Boolean(db),paypalConfigured:Boolean(clientId&&secret),telegramWebhookConfigured:Boolean(process.env.BACKEND_SHARED_SECRET)});
+  if(req.method==="POST"&&url.pathname==="/telegram/webhook"){
+   const expected=process.env.BACKEND_SHARED_SECRET||"",supplied=String(req.headers["x-transactra-edge-secret"]||"");
+   if(!expected||!supplied)return send(res,401,{error:"Webhook authentication failed."});
+   const a=Buffer.from(expected),b=Buffer.from(supplied);
+   if(a.length!==b.length||!timingSafeEqual(a,b))return send(res,401,{error:"Webhook authentication failed."});
+   const update=await read(req),updateId=Number(update.update_id);
+   if(!Number.isSafeInteger(updateId)||updateId<0)return send(res,400,{error:"Invalid Telegram update."});
+   if(processedTelegramUpdates.has(updateId))return send(res,200,{ok:true,duplicate:true});
+   try{await processTelegramUpdate(update);processedTelegramUpdates.add(updateId);if(processedTelegramUpdates.size>2000)processedTelegramUpdates.delete(processedTelegramUpdates.values().next().value!);return send(res,200,{ok:true});}
+   catch(e){console.error("Telegram webhook processing failed:",e instanceof Error?e.message:"unknown error");return send(res,500,{error:"Telegram update processing failed."});}
+  }
   if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.PAYPAL_ENV||"sandbox"});
   if(req.method==="POST"&&url.pathname==="/api/parse"){const b=await read(req);return send(res,200,{intent:await parse(String(b.text||""))});}
   if(req.method==="POST"&&url.pathname==="/api/workflows/plan"){
