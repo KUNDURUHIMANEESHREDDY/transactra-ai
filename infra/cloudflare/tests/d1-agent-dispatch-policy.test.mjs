@@ -11,6 +11,7 @@ function enabledEnv(ownerId) {
     NVIDIA_NIM_ZERO_COST_LIMIT_INR: "0",
     NVIDIA_NIM_API_KEY: "test-key",
     NVIDIA_NIM_MODEL: "stepfun-ai/step-5-preview",
+    CLOUDPILOT_INFERENCE_SECRET: "x".repeat(40),
   };
 }
 

@@ -88,6 +88,15 @@ See [STAGING.md](STAGING.md) for the isolated staging procedure and acceptance g
 - The recovery scheduler only creates/links tasks in the existing planner. It does not execute tasks, approve work, call an AI provider, or bypass the separate approval credential.
 - D1 migration `0008_orchestrator_memory_recovery.sql` is additive. Apply and verify it in isolated staging before any production migration or deployment. Existing production Worker and D1 were not changed by this source commit.
 
+## CloudPilot-backed agent orchestration (2026-11-12)
+
+- `cloudpilot.mjs` is the shared, fail-closed inference client for Telegram replies, task planning, specialist-agent reasoning and result evaluation. It uses only `https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions`; redirects and alternate hosts are rejected.
+- Configure `CLOUDPILOT_INFERENCE_SECRET` as a Cloudflare Worker secret. It must match the secret accepted by `cloudpilot-edge` (`TRANSACTRA_INFERENCE_SECRET`). Never put either secret in Wrangler TOML, source code, logs or task memory.
+- Requests require an exact INR 0 estimate, have an 8 KB combined prompt ceiling and a 512-token output ceiling. CloudPilot responses are accepted only when the returned model and token-usage fields are valid.
+- Planning and execution retain the NVIDIA Developer Program attestation, owner runtime switch and INR 0 controls. Agent execution also requires the CloudPilot secret. Missing or invalid CloudPilot configuration blocks execution; there is no silent provider fallback.
+- Existing tool authorization remains independent of the model: tool inputs are validated, repository writes and other side effects require single-use owner approval bound to the exact action hash, ambiguous outcomes are never replayed, and task completion requires accepted evaluator evidence.
+- **Capability boundary:** the active D1-native edge runtime currently exposes bounded research, evidence analysis, repository read/write, owner Telegram notification and staging verification/deployment adapters. The repository's separate Node workforce has a broader dynamic agent registry and additional GitHub, research, sandbox, operations, security and evolution capabilities, but the production Telegram D1-native path is not yet connected to that Node control plane. Do not describe email, general browser automation, calendar or arbitrary third-party actions as live until their adapters and runtime connection are implemented and verified.
+
 
 ## Production D1 encrypted backup (GitHub Actions)
 

@@ -1,5 +1,6 @@
 import { completeNvidiaNim, isNvidiaNimDeveloperAccessConfirmed, isNvidiaNimConfigured, getNvidiaNimReadiness } from "./nvidia-nim.mjs";
 import { createOrchestratorPlan } from "./orchestrator.mjs";
+import { cloudPilotConfig, completeCloudPilot } from "./cloudpilot.mjs";
 import { finalizeD1NativeCompletedJobs, processD1NativeApprovedJobs } from "./d1-agent-dispatch.mjs";
 import { isInnovationCycleDue, runInnovationCycle, evaluateInnovationCandidate } from "./innovation-pipeline.mjs";
 import { handleWhatsAppVerification, handleWhatsAppWebhook } from "./whatsapp-handler.mjs";
@@ -55,33 +56,6 @@ function buildPlannerObjective(description,memoryRows){
 }
 function constantTimeEqual(a,b){if(typeof a!=="string"||typeof b!=="string"||a.length!==b.length)return false;let mismatch=0;for(let i=0;i<a.length;i++)mismatch|=a.charCodeAt(i)^b.charCodeAt(i);return mismatch===0;}
 
-function cloudPilotConfig(env){
- const secret=typeof env.CLOUDPILOT_INFERENCE_SECRET==="string"?env.CLOUDPILOT_INFERENCE_SECRET:"";
- const raw=typeof env.CLOUDPILOT_INFERENCE_URL==="string"&&env.CLOUDPILOT_INFERENCE_URL.trim()?env.CLOUDPILOT_INFERENCE_URL.trim():"https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions";
- let endpoint;
- try{endpoint=new URL(raw);}catch{return {ok:false,reason:"endpoint_invalid"};}
- if(endpoint.protocol!=="https:"||endpoint.hostname!=="cloudpilot-edge.himaneeshreddyk.workers.dev"||endpoint.pathname!=="/chat/completions"||endpoint.search||endpoint.hash||endpoint.username||endpoint.password)return {ok:false,reason:"endpoint_not_allowlisted"};
- if(secret.length<32)return {ok:false,reason:"shared_secret_missing"};
- return {ok:true,endpoint,secret};
-}
-async function completeCloudPilot(env,request){
- const config=cloudPilotConfig(env);
- if(!config.ok)throw new Error("CloudPilot inference is not configured: "+config.reason);
- if(!request||request.estimatedCostInr!==0||typeof request.input!=="string"||!request.input.trim())throw new Error("CloudPilot dispatch requires a non-empty prompt and an exact INR 0 cost estimate");
- const systemPrompt=typeof request.systemPrompt==="string"?request.systemPrompt:"";
- if(new TextEncoder().encode(systemPrompt+request.input).byteLength>8000)throw new Error("CloudPilot input exceeds the 8000-byte limit");
- const maxTokens=Number(request.maxOutputTokens);
- if(!Number.isSafeInteger(maxTokens)||maxTokens<1||maxTokens>512)throw new Error("CloudPilot output token limit is invalid");
- const model=String(env.NVIDIA_NIM_MODEL||"stepfun-ai/step-5-preview");
- const startedAt=Date.now();
- const response=await fetch(config.endpoint.toString(),{method:"POST",headers:{authorization:"Bearer "+config.secret,"content-type":"application/json",accept:"application/json"},body:JSON.stringify({model,messages:[...(systemPrompt?[{role:"system",content:systemPrompt}]:[]),{role:"user",content:request.input}],max_tokens:maxTokens,temperature:0.2}),redirect:"error",signal:AbortSignal.timeout(125000)});
- if(!response.ok)throw new Error("CloudPilot inference returned HTTP "+response.status);
- const data=await response.json().catch(()=>null);
- const output=data?.choices?.[0]?.message?.content,returnedModel=data?.model;
- const promptTokens=Number(data?.usage?.prompt_tokens),completionTokens=Number(data?.usage?.completion_tokens);
- if(typeof output!=="string"||!output.trim()||returnedModel!==model||!Number.isSafeInteger(promptTokens)||promptTokens<0||!Number.isSafeInteger(completionTokens)||completionTokens<0)throw new Error("CloudPilot returned an invalid or unverifiable completion");
- return {output,provider:"cloudpilot-edge",model:returnedModel,latencyMs:Date.now()-startedAt,usage:{inputTokens:promptTokens,outputTokens:completionTokens}};
-}
 function telegramMessage(update){return update?.business_message||update?.message||null;}
 async function telegram(env,method,payload){const r=await fetch("https://api.telegram.org/bot"+env.TELEGRAM_BOT_TOKEN+"/"+method,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});const data=await r.json().catch(()=>({ok:false,description:"Invalid Telegram response"}));if(!r.ok||!data.ok)throw new Error("Telegram "+method+" failed: "+(data.description||r.status));return data.result;}
 async function recordTelegramWebhookDiagnostic(env,now,diagnostic){
@@ -535,7 +509,7 @@ export async function makeReply(update,env){
   });
   return completion.output.slice(0,3800);
  }catch(error){
-  return "NVIDIA NIM could not complete this reply. The request was not routed to another provider. Check /nvidia_status and try again later. ("+String(error instanceof Error?error.message:"provider error").slice(0,180)+")";
+  return "CloudPilot could not complete this reply. The request was not routed to another provider. Check /cloudpilot status and /provider, then try again later. ("+String(error instanceof Error?error.message:"provider error").slice(0,180)+")";
  }
 }
 async function resolveTelegramThreadId(env,update,chatId,updateId){

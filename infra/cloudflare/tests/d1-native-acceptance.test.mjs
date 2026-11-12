@@ -15,8 +15,7 @@ function streamedNimResponse(content, promptTokens = 12, completionTokens = 5) {
     { model, choices: [{ delta: { role: "assistant", content } }] },
     { model, choices: [], usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens } }
   ];
-  const body = chunks.map(chunk => "data: " + JSON.stringify(chunk) + "\n\n").join("") + "data: [DONE]\n\n";
-  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+  return new Response(JSON.stringify({ model, choices: [{ message: { content } }], usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens } }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -656,6 +655,7 @@ function controlledInferenceEnv(DB) {
     NVIDIA_NIM_ZERO_COST_LIMIT_INR: "0",
     NVIDIA_NIM_FREE_TIER_VERIFIED_AT: new Date().toISOString(),
     NVIDIA_NIM_TIMEOUT_MS: "1000",
+    CLOUDPILOT_INFERENCE_SECRET: "x".repeat(40),
     GITHUB_APP_ID: "12345",
     GITHUB_APP_INSTALLATION_ID: "98765",
     GITHUB_APP_PRIVATE_KEY: controlledGithubPrivateKey.export({ type: "pkcs8", format: "pem" }),
@@ -717,7 +717,7 @@ test("ambiguous approved side-effect outcomes are never replayed by duplicate or
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input);
       if (url.includes("/app/installations/")) return new Response(JSON.stringify({ token: "controlled-installation-token", permissions: { contents: "write", actions: "write" }, repositories: [{ full_name: "KUNDURUHIMANEESHREDDY/transactra" }] }), { status: 201 });
-      if (url.startsWith("https://integrate.api.nvidia.com/")) {
+      if (url === "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions") {
         inferenceCalls++;
         return streamedNimResponse("Preflight accepted for the already approved action.", 4, 3);
       }
@@ -793,7 +793,7 @@ test("controlled inference executes the exact owner-approved agent action and fi
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input);
       if (url.includes("/app/installations/")) return new Response(JSON.stringify({ token: "controlled-installation-token", permissions: { contents: "write", actions: "write" }, repositories: [{ full_name: "KUNDURUHIMANEESHREDDY/transactra" }] }), { status: 201 });
-      if (url.startsWith("https://integrate.api.nvidia.com/")) {
+      if (url === "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions") {
         inferenceCalls++;
         return streamedNimResponse("Provider preflight accepted for the owner-approved action.", 4, 3);
       }

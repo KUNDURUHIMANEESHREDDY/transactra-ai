@@ -56,7 +56,7 @@ See [Telegram setup and operations](docs/TELEGRAM.md) for details. The optional 
 
 ## Optional AI model
 
-Configure `CLOUDPILOT_INFERENCE_URL`, `CLOUDPILOT_INFERENCE_SECRET` and `AI_MODEL` to route payment-intent extraction through the CloudPilot Edge inference endpoint. The URL must point to CloudPilot's authenticated OpenAI-compatible `/chat/completions` route; the secret must match the Cloudflare Worker secret and must never be committed. If CloudPilot is not configured, the optional legacy `AI_BASE_URL` + `AI_API_KEY` endpoint remains available. If the model endpoint is unavailable, Transactra falls back to its deterministic local parser. Payment approval and execution remain entirely in Transactra.
+Configure `CLOUDPILOT_INFERENCE_URL`, `CLOUDPILOT_INFERENCE_SECRET` and `AI_MODEL` to route payment-intent extraction through the CloudPilot Edge inference endpoint. The Cloudflare `transactra-edge` orchestrator also uses this authenticated endpoint for task planning, specialist-agent reasoning and result evaluation; all model calls are gated by the owner runtime switch, verified NVIDIA Developer Program access and the INR 0 policy. The URL must point to CloudPilot's authenticated OpenAI-compatible `/chat/completions` route; the secret must match the Cloudflare Worker secret and must never be committed. If CloudPilot is unavailable, orchestration fails closed rather than silently switching providers. Payment approval and execution remain entirely in Transactra.
 
 ## Security
 

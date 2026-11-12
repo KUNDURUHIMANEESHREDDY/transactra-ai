@@ -8,8 +8,7 @@ function streamedNimResponse(content, promptTokens = 12, completionTokens = 5) {
     { model, choices: [{ delta: { role: "assistant", content } }] },
     { model, choices: [], usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens } }
   ];
-  const body = chunks.map(chunk => "data: " + JSON.stringify(chunk) + "\n\n").join("") + "data: [DONE]\n\n";
-  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+  return new Response(JSON.stringify({ model, choices: [{ message: { content } }], usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens } }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
 function nimEnv() {
@@ -20,6 +19,8 @@ function nimEnv() {
     NVIDIA_NIM_ZERO_COST_LIMIT_INR: "0",
     NVIDIA_NIM_API_KEY: "test-key",
     NVIDIA_NIM_MODEL: "stepfun-ai/step-5-preview",
+    CLOUDPILOT_INFERENCE_URL: "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions",
+    CLOUDPILOT_INFERENCE_SECRET: "x".repeat(40),
     TELEGRAM_OWNER_ID: "12345",
     DB: {
       prepare(sql) {
@@ -47,6 +48,9 @@ test("agent execution remains locked unless explicit flags, current entitlement,
     NVIDIA_NIM_EXECUTION_ENABLED: "true",
     NVIDIA_NIM_FREE_TIER_VERIFIED_AT: new Date().toISOString(),
   }), false);
+  const missingCloudPilot = nimEnv();
+  delete missingCloudPilot.CLOUDPILOT_INFERENCE_SECRET;
+  assert.equal(isAgentExecutionEnabled(missingCloudPilot), false);
   assert.equal(isAgentExecutionEnabled(nimEnv()), true);
 });
 

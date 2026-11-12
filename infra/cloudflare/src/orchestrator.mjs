@@ -1,4 +1,5 @@
-import { completeNvidiaNim, isNvidiaNimDeveloperAccessConfirmed } from "./nvidia-nim.mjs";
+import { isNvidiaNimDeveloperAccessConfirmed } from "./nvidia-nim.mjs";
+import { completeCloudPilot } from "./cloudpilot.mjs";
 import { validateToolInput, isSideEffectStep } from "./tool-adapters.mjs";
 
 const AGENTS = new Set(["researcher", "analyst", "builder", "operator", "verifier"]);
@@ -151,10 +152,10 @@ export async function createOrchestratorPlan(env, db, objective, memoryRows = []
   }
   const input = JSON.stringify(inputData);
   try {
-    const completion = await completeNvidiaNim(env, {
+    const completion = await completeCloudPilot(env, {
       systemPrompt: SYSTEM_PROMPT,
       input,
-      maxOutputTokens: 900,
+      maxOutputTokens: 512,
       estimatedCostInr: 0,
     });
     return parseAndValidatePlan(completion.output, cleanObjective);
@@ -204,7 +205,7 @@ export async function evaluateOrchestratorStep(env, db, input) {
     };
   }
   try {
-    const completion = await completeNvidiaNim(env, {
+    const completion = await completeCloudPilot(env, {
       systemPrompt: "Evaluate task-step evidence against the acceptance criteria. Return only JSON: {decision:'accepted'|'retry'|'replan'|'human_review',rationale:string,evidence_gaps:string[]}. Never claim to have executed tools. Choose accepted only when evidence directly satisfies criteria. High-risk or external side effects always require human review.",
       input: JSON.stringify(evidence),
       maxOutputTokens: 350,
