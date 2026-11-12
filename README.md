@@ -75,3 +75,8 @@ Configure `CLOUDPILOT_INFERENCE_URL`, `CLOUDPILOT_INFERENCE_SECRET` and `AI_MODE
 - `npm run typecheck` — TypeScript validation
 - `npm run build` — production build
 - `npm test` — tests
+
+
+### Test CloudPilot from Telegram
+
+Configure `CLOUDPILOT_INFERENCE_URL=https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions`, set `CLOUDPILOT_INFERENCE_SECRET` to the same 32+ byte secret configured on the `cloudpilot-edge` Worker as `TRANSACTRA_INFERENCE_SECRET`, and set `AI_MODEL=stepfun-ai/step-5-preview`. Restart the Transactra API and Telegram bot, then send `/ai Explain how Transactra protects a PayPal payment.` to the Transactra bot. Payment parsing also uses CloudPilot when the endpoint is configured. The CloudPilot endpoint does not authorize or execute payments; Transactra retains approval and PayPal checkout controls.
