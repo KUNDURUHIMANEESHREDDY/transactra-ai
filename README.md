@@ -56,7 +56,7 @@ See [Telegram setup and operations](docs/TELEGRAM.md) for details. The optional 
 
 ## Optional AI model
 
-Set `AI_BASE_URL`, `AI_API_KEY` and `AI_MODEL` to use an OpenAI-compatible `/chat/completions` endpoint. If omitted or unavailable, Transactra falls back to its local parser. No external AI key is needed for the core demo.
+Configure `CLOUDPILOT_INFERENCE_URL`, `CLOUDPILOT_INFERENCE_SECRET` and `AI_MODEL` to route payment-intent extraction through the CloudPilot Edge inference endpoint. The URL must point to CloudPilot's authenticated OpenAI-compatible `/chat/completions` route; the secret must match the Cloudflare Worker secret and must never be committed. If CloudPilot is not configured, the optional legacy `AI_BASE_URL` + `AI_API_KEY` endpoint remains available. If the model endpoint is unavailable, Transactra falls back to its deterministic local parser. Payment approval and execution remain entirely in Transactra.
 
 ## Security
 
