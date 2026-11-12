@@ -21,12 +21,12 @@ test("staging Worker is isolated from production D1 and queues", () => {
   assert.equal(scalar(staging, "name"), "transactra-edge-staging");
   assert.equal(scalar(staging, "main"), "src/index.mjs");
   assert.equal(scalar(staging, "database_name"), "transactra-staging");
-  assert.equal(scalar(staging, "database_id"), "e7292f55-c90e-4d34-8b77-c97c3e5ec15a");
+  assert.equal(scalar(staging, "database_id"), "312d97f4-47b4-4084-84d5-21c5fe9c5538");
   assert.equal(scalar(staging, "migrations_dir"), "migrations");
   assert.equal(scalar(staging, "MEM0_ENABLED"), "false");
   assert.equal(scalar(staging, "TRANSACTRA_ENV"), "staging");
   assert.equal(scalar(staging, "TRANSACTRA_PLANNER_MODE"), "d1-native");
-  assert.equal(scalar(staging, "TRANSACTRA_D1_DATABASE_ID"), "e7292f55-c90e-4d34-8b77-c97c3e5ec15a");
+  assert.equal(scalar(staging, "TRANSACTRA_D1_DATABASE_ID"), "312d97f4-47b4-4084-84d5-21c5fe9c5538");
   assert.equal(scalar(staging, "TRANSACTRA_STAGING_BASE_URL"), "https://transactra-edge-staging.himaneeshreddyk.workers.dev");
   assert.equal(scalar(staging, "TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED"), "false");
   assert.equal(scalar(staging, "NVIDIA_NIM_PLANNING_ENABLED"), "false");
@@ -49,7 +49,7 @@ test("staging Worker is isolated from production D1 and queues", () => {
   assert.doesNotMatch(staging, /^\s*\[ai\]\s*$/m, "staging must not configure an inference binding");
   assert.doesNotMatch(deployWorkflow, /^  push:/m, "staging deploy must never run automatically on every main push");
   assert.doesNotMatch(deployWorkflow, /faf1f8b5-e029-4598-9fb0-c3cb1106d311/, "staging deployment must never query or write production D1");
-  assert.match(deployWorkflow, /e7292f55-c90e-4d34-8b77-c97c3e5ec15a/);
+  assert.match(deployWorkflow, /312d97f4-47b4-4084-84d5-21c5fe9c5538/);
   assert.match(deployWorkflow, /evaluation_json=\?/);
   assert.match(deployWorkflow, /decision = "accepted"/);
   assert.match(deployWorkflow, /acceptance = "passed"/);
@@ -68,7 +68,7 @@ test("production Worker remains bound only to its production D1 and queues", () 
   const configuredQueues = [...production.matchAll(/^queue = "([^"]+)"$/gm)].map((match) => match[1]);
   assert.deepEqual(configuredQueues, ["transactra-events", "transactra-events"]);
   assert.match(production, /dead_letter_queue = "transactra-events-dlq"/);
-  assert.doesNotMatch(production, /transactra-staging|e7292f55-c90e-4d34-8b77-c97c3e5ec15a/);
+  assert.doesNotMatch(production, /transactra-staging|312d97f4-47b4-4084-84d5-21c5fe9c5538/);
 });
 
 test("staging migration directory contains the complete reviewed sequence", () => {
@@ -89,6 +89,8 @@ test("staging migration directory contains the complete reviewed sequence", () =
     "0013_memory_lifecycle.sql",
     "0014_nvidia_runtime_control.sql",
     "0015_orchestrator_step_evidence.sql",
+    "0016_model_registry_and_task_routing.sql",
+    "0017_telegram_outbox_delivery_leases.sql",
   ]);
   const runtimeControl = readFileSync(resolve(migrationsDir, "0014_nvidia_runtime_control.sql"), "utf8");
   assert.match(runtimeControl, /CREATE TABLE IF NOT EXISTS nvidia_runtime_control/);

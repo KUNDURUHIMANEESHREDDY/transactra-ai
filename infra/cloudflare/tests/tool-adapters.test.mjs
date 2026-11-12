@@ -97,7 +97,7 @@ test("GitHub App authentication converts downloaded PKCS1 keys and requests a re
     assert.equal(claims.exp - claims.iat, 600);
     assert.deepEqual(exchangeBody, {
       repositories: ["transactra"],
-      permissions: { contents: "write", actions: "write" },
+      permissions: { contents: "read" },
     });
   } finally { globalThis.fetch = originalFetch; }
 });

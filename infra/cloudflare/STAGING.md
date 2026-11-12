@@ -2,8 +2,8 @@
 
 ## Safety boundary
 
-- Staging Worker: `transactra-edge-staging`.
-- Staging D1: `transactra-staging`, ID `e7292f55-c90e-4d34-8b77-c97c3e5ec15a`.
+- Staging Worker: `transactra-edge-staging` (not yet deployed in the current account; deploy only after staging secrets are configured).
+- Staging D1: `transactra-staging`, ID `312d97f4-47b4-4084-84d5-21c5fe9c5538`.
 - Staging queue: `transactra-events-staging`; dead-letter queue: `transactra-events-dlq-staging`.
 - Staging Telegram bot only. Never register the production bot token against the staging webhook.
 - The staging workflow has no `push` trigger. It runs only when an owner manually dispatches `Transactra Staging Deploy` or when Transactra dispatches an exact owner-approved staging action.
@@ -39,12 +39,19 @@ Create/use the GitHub Actions environment named `transactra-staging`.
 | `GITHUB_APP_PRIVATE_KEY` | RSA PEM private key for the GitHub App (PKCS#1 or PKCS#8); stored only as a GitHub environment secret |
 | `TELEGRAM_BOT_TOKEN` | Dedicated staging bot token, not the production bot |
 | `TELEGRAM_WEBHOOK_SECRET` | Dedicated staging webhook secret |
+| `CLOUDFLARE_READONLY_API_TOKEN` | Optional runtime token scoped only to Workers Scripts Read, Queues Read and D1 Read |
+| `TAVILY_API_KEY` | Optional general web research provider; Wikimedia remains the fallback |
+| `BACKEND_SHARED_SECRET` | Optional shared secret matching the authenticated Node Financial Policy API |
+
+**Optional GitHub environment variable**
+
+- `TRANSACTRA_API_BASE_URL`: HTTPS origin of the existing PostgreSQL-backed Node API. It is installed as a Worker secret by the staging bootstrap script so the payment adapter can prepare a policy challenge. Do not set it until the API endpoint is reachable and its owner identity matches staging.
 
 **Environment variable**
 
 - `TELEGRAM_STAGING_BOT_ID`: numeric Telegram bot ID returned by `getMe`.
 
-Do not use a Global GitHub token, organization-wide token, Cloudflare Global API Key or production Telegram credentials. The staging workflow mints a short-lived installation token with Contents read/write and Actions write permissions, restricted to the `transactra` repository. The Worker independently signs an RS256 App JWT and exchanges it for a fresh repository-scoped installation token per GitHub operation. The App ID, installation ID and private key are installed as Worker secrets; no static PAT or long-lived GitHub token is stored.
+Do not use a Global GitHub token, organization-wide token, Cloudflare Global API Key or production Telegram credentials. The staging workflow mints a short-lived installation token restricted to the `transactra` repository. The GitHub App installation must grant Contents read/write, Issues read/write, Pull requests read, and Actions read/write. The Worker independently signs an RS256 App JWT and exchanges it for a fresh repository-scoped installation token with only the permission subset required by each GitHub operation. The App ID, installation ID and private key are installed as Worker secrets; no static PAT or long-lived GitHub token is stored.
 
 ## Configure the staging Telegram bot securely
 
@@ -55,7 +62,7 @@ In GitHub, open **Settings → Environments → transactra-staging**.
 
 - Under **Variables**, add `TELEGRAM_STAGING_BOT_ID` with the numeric ID returned by Telegram `getMe`. Do not set it to the production bot ID.
 - Under **Secrets**, add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`. Keep the token in the GitHub secret store; never paste it into a workflow command, source file, TOML file or shell command argument.
-- Also add `CLOUDFLARE_API_TOKEN`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY` as described above. The GitHub App installation must be restricted to this repository and grant Contents read/write plus Actions write.
+- Also add `CLOUDFLARE_API_TOKEN`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY` as described above. The GitHub App installation must be restricted to this repository and grant Contents read/write, Issues read/write, Pull requests read and Actions read/write. Optional research, Cloudflare read-only and financial API secrets are installed only when their GitHub environment values are present.
 
 If you must manually inspect a dedicated staging bot token in a local PowerShell session, use a hidden prompt and pass it through standard input, never a command-line argument:
 
@@ -93,7 +100,7 @@ After all six GitHub environment secrets and `TELEGRAM_STAGING_BOT_ID` are confi
 4. Approve the `transactra-staging` environment gate if GitHub requests it.
 5. Keep the local runner online and wait for the workflow.
 
-The bootstrap sequence validates credentials and staging-only configuration, installs locked dependencies, runs tests/security gates, applies all pending reviewed migrations (through 0015) to staging D1 only, deploys the staging Worker, installs Worker secrets, verifies `/health` and `/ready`, registers the staging Telegram webhook and runs `infra/cloudflare/scripts/staging-acceptance.mjs`.
+The bootstrap sequence validates credentials and staging-only configuration, installs locked dependencies, runs tests/security gates, applies all pending reviewed migrations (through 0017) to staging D1 only, deploys the staging Worker, installs Worker secrets, verifies `/health` and `/ready`, registers the staging Telegram webhook and runs `infra/cloudflare/scripts/staging-acceptance.mjs`.
 
 If a required secret is missing or invalid, preflight stops before remote migrations or Worker deployment. Do not work around a failed preflight by using production credentials.
 

@@ -3,13 +3,17 @@ main = "src/index.mjs"
 compatibility_date = "2026-11-09"
 workers_dev = true
 
+# Isolated execution for bounded agent code; no outbound network.
+[[worker_loaders]]
+binding = "LOADER"
+
 # STAGING ONLY. Never copy the production D1 ID or queue names here.
 # Cloudflare Free status is owner-attested (2026-11-09); billing is not independently API-verified.
 # This ID is the separately provisioned staging database; never replace it with production.
 [[d1_databases]]
 binding = "DB"
 database_name = "transactra-staging"
-database_id = "e7292f55-c90e-4d34-8b77-c97c3e5ec15a"
+database_id = "312d97f4-47b4-4084-84d5-21c5fe9c5538"
 migrations_dir = "migrations"
 
 [[queues.producers]]
@@ -29,7 +33,8 @@ MEM0_MONTHLY_ADDITION_LIMIT = "10000"
 MEM0_MONTHLY_RETRIEVAL_LIMIT = "1000"
 MEM0_COMPACTION_THRESHOLD_PERCENT = "70"
 TRANSACTRA_ENV = "staging"
-TRANSACTRA_D1_DATABASE_ID = "e7292f55-c90e-4d34-8b77-c97c3e5ec15a"
+CLOUDFLARE_ACCOUNT_ID = "e15f135fd5ae49e30f892777aebec675"
+TRANSACTRA_D1_DATABASE_ID = "312d97f4-47b4-4084-84d5-21c5fe9c5538"
 TRANSACTRA_STAGING_BASE_URL = "https://transactra-edge-staging.himaneeshreddyk.workers.dev"
 TRANSACTRA_PLANNER_MODE = "d1-native"
 TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED = "false"

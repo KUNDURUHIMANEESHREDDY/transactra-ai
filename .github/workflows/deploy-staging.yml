@@ -50,6 +50,10 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: e15f135fd5ae49e30f892777aebec675
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_READONLY_API_TOKEN: ${{ secrets.CLOUDFLARE_READONLY_API_TOKEN }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      BACKEND_SHARED_SECRET: ${{ secrets.BACKEND_SHARED_SECRET }}
+      TRANSACTRA_API_BASE_URL: ${{ vars.TRANSACTRA_API_BASE_URL }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_STAGING_BOT_ID: ${{ vars.TELEGRAM_STAGING_BOT_ID }}
       TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
@@ -75,6 +79,8 @@ jobs:
           owner: KUNDURUHIMANEESHREDDY
           repositories: transactra
           permission-contents: write
+          permission-issues: write
+          permission-pull-requests: read
           permission-actions: write
 
       - name: Export ephemeral GitHub token to staging job
@@ -103,7 +109,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.0.0
+          version: 12.14.0
           run_install: false
 
       - name: Setup Node.js
@@ -125,8 +131,8 @@ jobs:
           foreach ($required in @(
             'name\s*=\s*"transactra-edge-staging"',
             'database_name\s*=\s*"transactra-staging"',
-            'database_id\s*=\s*"e7292f55-c90e-4d34-8b77-c97c3e5ec15a"',
-            'TRANSACTRA_D1_DATABASE_ID\s*=\s*"e7292f55-c90e-4d34-8b77-c97c3e5ec15a"',
+            'database_id\s*=\s*"312d97f4-47b4-4084-84d5-21c5fe9c5538"',
+            'TRANSACTRA_D1_DATABASE_ID\s*=\s*"312d97f4-47b4-4084-84d5-21c5fe9c5538"',
             'queue\s*=\s*"transactra-events-staging"',
             'TRANSACTRA_PLANNER_MODE\s*=\s*"d1-native"',
             'TRANSACTRA_AGENT_EXECUTION_ENABLED\s*=\s*"false"',
@@ -150,7 +156,7 @@ jobs:
           if ($taskId -notmatch '^tg-[A-Za-z0-9_-]{1,80}$' -or $stepId -notmatch '^step-[1-8]$' -or
               $approvalId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' -or
               $actionHash -notmatch '^[0-9a-fA-F]{64}$' -or
-              $databaseId -ne "e7292f55-c90e-4d34-8b77-c97c3e5ec15a") {
+              $databaseId -ne "312d97f4-47b4-4084-84d5-21c5fe9c5538") {
             throw "Approved staging dispatch metadata failed validation."
           }
           $sql = "SELECT id,task_id,step_id,owner_id,status,action_hash,action_json,expires_at,consumed_at FROM orchestrator_step_approvals WHERE id = ?"
@@ -180,13 +186,13 @@ jobs:
           Write-Host "Verified the consumed owner-approved staging action in the isolated staging D1 database."
 
       - name: Install locked dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: pnpm install --frozen-lockfile
 
       - name: Run build, regression, Cloudflare and security gates
         run: |
           pnpm test
           if ($LASTEXITCODE -ne 0) { throw "Application tests failed." }
-          pnpm test:cloudflare-nim
+          node --experimental-sqlite --test infra/cloudflare/tests/*.test.mjs
           if ($LASTEXITCODE -ne 0) { throw "Cloudflare safety tests failed." }
           pnpm audit --audit-level high
           if ($LASTEXITCODE -ne 0) { throw "Dependency audit failed." }
@@ -195,12 +201,12 @@ jobs:
 
       - name: Apply migrations to staging D1 only
         run: |
-          pnpm dlx wrangler@4 d1 migrations apply transactra-staging --remote --config infra/cloudflare/wrangler.staging.toml
+          pnpm exec wrangler d1 migrations apply transactra-staging --remote --config infra/cloudflare/wrangler.staging.toml
           if ($LASTEXITCODE -ne 0) { throw "Staging D1 migration failed; Worker deployment stopped." }
 
       - name: Deploy staging Worker only
         run: |
-          pnpm dlx wrangler@4 deploy --config infra/cloudflare/wrangler.staging.toml
+          pnpm exec wrangler deploy --config infra/cloudflare/wrangler.staging.toml
           if ($LASTEXITCODE -ne 0) { throw "Staging Worker deployment failed." }
 
       - name: Install staging Worker secrets

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createOrchestratorPlan, evaluateOrchestratorStep, replanOrchestratorFailure, ORCHESTRATOR_POLICY, validateApprovedExecutionPlan, requiresOwnerStepApproval } from "../src/orchestrator.mjs";
+import { createOrchestratorPlan, evaluateOrchestratorStep, replanOrchestratorFailure, ORCHESTRATOR_POLICY, validateApprovedExecutionPlan, requiresOwnerStepApproval, isAgentToolAllowed } from "../src/orchestrator.mjs";
 
 test("creates a deterministic, approval-gated fallback when model planning is disabled", async () => {
   const plan = await createOrchestratorPlan({}, {}, "Prepare a release checklist");
@@ -88,13 +88,13 @@ test("dispatch-time plan validation rejects unsafe tools and invalid dependency 
   assert.equal(validateApprovedExecutionPlan(valid).steps.length, 2);
   assert.throws(() => validateApprovedExecutionPlan({
     ...valid, steps: [{ ...valid.steps[0], tool: "shell_exec" }],
-  }), /failed agent, tool, dependency, or safety validation/);
+  }), /failed agent, tool-grant, dependency, or safety validation/);
   assert.throws(() => validateApprovedExecutionPlan({
     ...valid, steps: [{ ...valid.steps[0] }, { ...valid.steps[1], depends_on: [1, 1] }],
-  }), /failed agent, tool, dependency, or safety validation/);
+  }), /failed agent, tool-grant, dependency, or safety validation/);
   assert.throws(() => validateApprovedExecutionPlan({
     ...valid, steps: [{ ...valid.steps[0] }, { ...valid.steps[1], depends_on: [2] }],
-  }), /failed agent, tool, dependency, or safety validation/);
+  }), /failed agent, tool-grant, dependency, or safety validation/);
 });
 
 test("high-risk and side-effect steps always require separate owner approval", () => {
@@ -138,5 +138,22 @@ test("approved side-effect result is accepted only when the adapter confirms com
 
 test("dispatch-time plan validation rejects staging tools in production-only mode", () => {
   const staging = { version: 2, steps: [{ id: "step-1", agent: "operator", tool: "cloudflare_staging", tool_input: { environment: "staging", operation: "verify" }, description: "Verify", acceptance_criteria: "Health is ready", risk: "low", depends_on: [] }] };
-  assert.throws(() => validateApprovedExecutionPlan(staging), /failed agent, tool, dependency, or safety validation/);
+  assert.throws(() => validateApprovedExecutionPlan(staging), /failed agent, tool-grant, dependency, or safety validation/);
+});
+
+test("agent-specific tool grants enforce least privilege, especially for finance and repository writes", () => {
+  assert.equal(isAgentToolAllowed("finance_officer", "financial_policy_prepare"), true);
+  assert.equal(isAgentToolAllowed("builder", "financial_policy_prepare"), false);
+  assert.equal(isAgentToolAllowed("builder", "repository_write"), true);
+  assert.equal(isAgentToolAllowed("quality_engineer", "repository_write"), false);
+  const unsafe = {
+    version: 2,
+    steps: [{ id: "step-1", agent: "builder", tool: "financial_policy_prepare", tool_input: { text: "Pay $20 to Alex" }, description: "Prepare payment", acceptance_criteria: "A policy approval challenge is created", risk: "high", depends_on: [] }],
+  };
+  assert.throws(() => validateApprovedExecutionPlan(unsafe), /tool-grant/);
+  const safe = {
+    version: 2,
+    steps: [{ id: "step-1", agent: "finance_officer", tool: "financial_policy_prepare", tool_input: { text: "Pay $20 to Alex" }, description: "Prepare payment", acceptance_criteria: "A policy approval challenge is created without moving funds", risk: "high", depends_on: [] }],
+  };
+  assert.equal(validateApprovedExecutionPlan(safe).steps[0].agent, "finance_officer");
 });

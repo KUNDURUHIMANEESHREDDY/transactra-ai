@@ -1,31 +1,31 @@
 # Transactra Cloudflare edge runtime
 
-**Status: the existing production task-inbox Worker is deployed; the Telegram-to-existing-planner bridge remains source-only.** Read-only account verification on 2026-11-09 found that production D1 still lacks the pipeline-link columns, the dedicated staging D1 has no application migrations, and no staging Worker is deployed. This is not a completed migration or an AI-agent runtime.
+**Current status (2026-11-12): expanded agent runtime and integrations are source-only; production cutover is not complete.** A live Cloudflare account check returned HTTP 404 for the intended `transactra-edge` Worker. The deployed `transactra-telegram` Worker exists, but its `DB` binding points to the `cloudpilot-staging` D1 database (`e7292f55-c90e-4d34-8b77-c97c3e5ec15a`) and its inspected bindings do not include the `transactra-events` Queue. It has Telegram token/webhook secrets and the owner identity. Do not treat this Worker as a production-ready Transactra execution runtime: it is connected to the staging database.
 
-## What this slice provides
+The intended production D1 database `transactra` (`faf1f8b5-e029-4598-9fb0-c3cb1106d311`) and queues `transactra-events` / `transactra-events-dlq` exist. The repository's `wrangler.toml` targets a new `transactra-edge` Worker with those production resources, but that Worker has not been deployed. The staging and production release workflows remain separate and gated. No Telegram webhook was changed by this source work.
 
-- `GET /health`: non-sensitive liveness response.
-- `GET /ready`: fail-closed readiness check for required bindings, all seven D1 runtime tables, bridge-link columns, and the HTTPS control-plane `/health/ready` schema contract; returns only ready/not-ready without exposing configuration details.
-- Owner-only `/task <description>` and `/tasks` Telegram commands: persist task requests and list the latest ten. New tasks are marked `awaiting_provider`; this is durable intake only, not agent execution.
-- `POST /telegram/webhook`: validates Telegram's webhook secret header and refuses ingestion when any owner-reply binding is missing, then queues a validated update.
-- Queue consumer: idempotently stores Telegram updates in D1 and sends owner-verified replies through a D1 outbox. It also persists owner `/task` requests and returns their held status.
-- Cron trigger: writes a scheduler heartbeat only; it does not claim to run autonomous agents.
+## Current source capabilities (not yet live)
+
+- Owner Telegram intake accepts `/task` and `/goal`, plus imperative natural-language objectives, and persists them in the D1-native planner.
+- All ten exact Node workforce catalogue IDs are recognized by the planner/runtime, with five edge-specialist roles added. Role-specific tool grants are enforced at plan validation and execution. This mirrors the Node catalogue; it does not prove a separate long-running Node service is deployed.
+- Read-only tools include Tavily/Wikimedia research, owner-scoped Mem0/D1 memory search, GitHub issue/PR/Actions inspection, repository reads, Cloudflare Worker/Queue/D1 observation, bounded data analysis and isolated code verification. Approved memory writes persist to D1 and enqueue Mem0 synchronization.
+- Owner-approved side effects include GitHub issue creation, restricted source writes, owner notifications and payment preparation through the existing Financial Policy API. Payments still require a separate policy challenge, PayPal buyer authorization and explicit capture command.
+- Approved task/step decisions enqueue durable `orchestrator.dispatch` messages. Cron remains the recovery backstop. D1 leases, immutable approval hashes, per-agent ledgers and evaluator evidence guard execution.
+- Successful tasks persist an evidence-backed report in `task_events`, enqueue it through a lease-protected Telegram outbox, and support `/report <task-id>`.
+- Dynamic Worker code verification uses a Worker Loader binding, `globalOutbound: null`, no injected secrets/bindings, a 10 ms CPU cap, zero subrequests and a five-second wall limit.
 
 No bot token, GitHub credentials, source records, or secret values belong in this directory or Git history.
 
-## Provisioned Cloudflare resources
+## Cloudflare resources verified on 2026-11-12
 
-The Cloudflare API confirmed these resources on 2026-11-09: Worker `transactra-edge` (100% traffic on the current deployment; workers.dev enabled), D1 database `transactra`, queue `transactra-events`, dead-letter queue `transactra-events-dlq`, and a `*/15 * * * *` Cron Trigger. The primary queue has one Worker producer and one consumer. The Worker has D1/queue bindings, an owner-identity binding, Telegram token/webhook secret bindings, and a Workers AI binding named `AI`. Secret values were not read.
+- Worker `transactra-edge`: absent (direct API lookup returned 404).
+- Worker `transactra-telegram`: present; D1 binding points to `cloudpilot-staging`; no Queue binding was present in the inspected settings; Telegram secret names were visible but values were not read.
+- D1 databases: `transactra`, `cloudpilot-staging`, `cloudpilot`, a restore-rehearsal database, and the newly provisioned dedicated `transactra-staging` database (`312d97f4-47b4-4084-84d5-21c5fe9c5538`).
+- Queues: production `transactra-events` / `transactra-events-dlq`, newly provisioned staging `transactra-events-staging` / `transactra-events-dlq-staging`, plus separate CloudPilot queues.
+- Cloudflare account billing/plan state and Dynamic Worker Loader eligibility have not been verified. Do not add a billing method or accept a paid upgrade to satisfy a runtime prerequisite.
 
-The account's billing/plan state has not been verified. Resource existence does not prove the ₹0/no-card requirement; do not claim that constraint is certified.
+The Worker Loader binding is declared in both Wrangler configurations. Runtime sandbox availability still requires a successful isolated staging deployment and health/acceptance test. Optional tool credentials are deliberately fail-closed and must be configured separately.
 
-Current configuration and bindings:
-
-- `wrangler.toml` contains the provisioned D1 database ID and the `transactra-events` producer/consumer configuration.
-- The Worker has `TELEGRAM_WEBHOOK_SECRET` and `TELEGRAM_BOT_TOKEN` secret bindings plus the owner-identity binding. Only secret names were inspected; values were not read.
-- `wrangler.toml` declares the non-secret `NVIDIA_NIM_MODEL` and `NVIDIA_NIM_TIMEOUT_MS` variables so `wrangler deploy` reconciles them. They previously existed only as dashboard variables, which a config-driven deploy would have silently dropped. `NVIDIA_NIM_API_KEY` stays a Worker secret and is never committed. `NVIDIA_NIM_FREE_TIER_VERIFIED_AT` is intentionally left unset, which keeps the NIM provider fail-closed until the free-tier terms are verified by hand.
-- Migrations `0001`–`0004` define event, reply-outbox, heartbeat, task, task-event, task-run, and task-run-event tables. Migration `0008_orchestrator_memory_recovery.sql` adds owner-scoped memory, immutable task-memory snapshots, an orchestration job ledger with leases/retries/dead letters, and orchestration events. The expanded readiness contract requires all eleven tables.
-- Do not add a billing method or accept a paid upgrade. Verify the account's free-plan eligibility and quotas before any further deployment or workload expansion.
 
 ## Local verification and deployment
 
@@ -48,21 +48,20 @@ Never put secret values in command-line arguments, shell history, CI logs, or co
 
 ## Important limitations
 
-- The deployed production Worker is still `transactra-edge`; this workstream did not deploy a new version or change its webhook, queues, cron or D1. Read-only D1 inspection found one existing task and one run, both `awaiting_provider`, and confirmed that the production `tasks` table has no pipeline-link columns. The dedicated staging D1 contains no application tables, and its queues have no Worker producer/consumer. `/ready` has not been externally smoke-tested.
-- The cron handler records a scheduler heartbeat, prunes expired memory, and recovers due orchestrator handoffs using bounded retries and expiring D1 leases. It is not the 48-hour project cycle or a task-execution worker. At 2026-11-09 11:17 IST, D1 contained the expected event/outbox/heartbeat tables, 5 inbound Telegram events, 1 sent reply, and a recent scheduler heartbeat. This is aggregate evidence, not a complete external HTTP acceptance test.
-- This Worker does not replace PostgreSQL, Docker, the long-running Node worker, or the code-execution sandbox.
+- The deployed `transactra-telegram` Worker is bound to the `cloudpilot-staging` D1 database and has no inspected `transactra-events` Queue binding. The intended `transactra-edge` Worker is absent. This workstream did not change either Worker, the Telegram webhook, queues, Cron or D1. The production `transactra` D1 database and queues exist, but the new migration sequence has not been applied there. `/ready` has not been externally smoke-tested against the intended edge Worker.
+- The source Cron handler records a scheduler heartbeat, expires stale memory, reconciles approved D1-native jobs and retries pending Telegram outbox rows. Approved task/step decisions also enqueue `orchestrator.dispatch` for immediate processing. Neither path is live until the intended Worker is deployed with the correct production bindings and secrets.
+- The D1-native edge runtime does not replace the separate PostgreSQL-backed Node API/worker host. The bounded Dynamic Worker sandbox is source-configured, but requires a Loader binding and successful staging validation; it is not a Docker or general build environment.
 - D1 is not PostgreSQL. A full migration requires a separately reviewed schema/data adapter and verified export of all seven AppDeploy tables.
 - AppDeploy remains authoritative and online. Do not switch Telegram webhook ownership or cut over until data parity, auth, retries, restore, and rollback checks pass.
-- The task inbox, durable task-run ledger, and Workers AI binding are deployed. Telegram `/task`, `/tasks`, and `/task-status` were externally smoke-tested successfully. The new `/provider` command is ready for a Telegram smoke test. The updated Node test suite has not been executed in this environment. Task runs remain `awaiting_provider`; AI inference is intentionally disabled and no execution consumer is enabled. Before enabling inference, confirm the account is on Workers Free and implement daily usage caps, approval checks, bounded orchestration, and dead-letter replay.
+- The new D1-native agent planner, tool adapters, report outbox, and queue dispatch are source-only. The Cloudflare account has a separate `transactra-telegram` script bound to staging D1, while `transactra-edge` is absent. No production Telegram acceptance test has been run against this code. The owner approval, exact-action hash, verified zero-cost inference, and step-evaluator gates remain mandatory.
 
 
-## Inference provider selection (2026-11-09)
+## Inference provider selection (2026-11-12)
 
-- Selected primary provider: Cloudflare Workers AI; model: `@cf/zai-org/glm-4.7-flash`.
-- `infra/cloudflare/wrangler.toml` declares the `AI` binding. The Worker exposes `/provider` to report binding availability and the fail-closed state.
-- AI execution is deliberately disabled. The Cloudflare connection cannot read the account subscription/plan endpoint (Billing Read permission is unavailable), so Workers Free eligibility cannot be verified from this connection. No inference request has been sent. Do not enable inference or claim ₹0 usage until the account is confirmed on Workers Free in the dashboard.
-- On Workers Free, Cloudflare documents 10,000 Neurons/day and says requests fail when the free allocation is exceeded. On Workers Paid, usage beyond that allocation is billable. Never use AI Gateway unified billing, third-party models, a paid plan, or paid fallback for Transactra.
-- GLM-4.7-Flash is listed as Free-plan eligible and supports function calling, but the free allocation is capped and can be exhausted by other account workloads.
+- The current D1-native agent path uses the pinned NVIDIA NIM model through the CloudPilot edge inference gateway. The CloudPilot endpoint is fixed to `https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions`; redirects and alternate hosts are rejected.
+- `NVIDIA_NIM_API_KEY` and `CLOUDPILOT_INFERENCE_SECRET` are runtime secrets only. The NIM free-tier entitlement must be independently verified and current; a key alone does not enable inference.
+- Model planning and agent execution have separate explicit flags. Owner runtime OFF, missing NIM attestation, missing provider secrets or a non-zero cost estimate blocks inference before external execution.
+- The old Workers AI `AI` binding and GLM-4.7-Flash selection are historical configuration, not proof of the active planner provider. Do not enable a paid provider, billing fallback, or paid account upgrade.
 
 
 ## Telegram task-planner bridge — prepared, not deployed

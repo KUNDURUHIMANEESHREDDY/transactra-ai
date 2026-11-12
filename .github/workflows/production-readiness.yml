@@ -67,7 +67,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.0.0
+          version: 12.14.0
           run_install: false
 
       - name: Set up Node.js
@@ -85,7 +85,7 @@ jobs:
 
       - name: Cloudflare workforce, orchestration and fail-closed acceptance suite
         run: |
-          pnpm test:cloudflare-nim
+          node --experimental-sqlite --test infra/cloudflare/tests/*.test.mjs
           if ($LASTEXITCODE -ne 0) { throw "Cloudflare workforce/orchestration safety suite failed." }
 
       - name: Dependency vulnerability audit

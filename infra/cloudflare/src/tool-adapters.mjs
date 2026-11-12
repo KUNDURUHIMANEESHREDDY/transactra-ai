@@ -1,3 +1,5 @@
+import { searchMem0Memory, enqueueMem0Memory } from "./memory-lifecycle.mjs";
+
 const DEFAULT_REPOSITORY = "KUNDURUHIMANEESHREDDY/transactra";
 const MAX_RESEARCH_RESULTS = 3;
 const MAX_REPOSITORY_FILE_BYTES = 128 * 1024;
@@ -43,6 +45,58 @@ export function validateToolInput(tool, raw = {}) {
       rejectCredentialText(query);
       return { query };
     }
+    case "github_issues_read": {
+      const state = raw.state === undefined ? "open" : raw.state;
+      const limit = raw.limit === undefined ? 20 : Number(raw.limit);
+      if (!["open", "closed", "all"].includes(state) || !Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("GitHub issue query requires state open, closed or all and limit 1–50");
+      return { state, limit };
+    }
+    case "github_issue_create": {
+      const title = boundedText(raw.title, "Issue title", 3, 120);
+      const body = raw.body === undefined ? "" : boundedText(raw.body, "Issue body", 0, 3000);
+      const labels = raw.labels === undefined ? [] : raw.labels;
+      if (!Array.isArray(labels) || labels.length > 5 || labels.some(label => typeof label !== "string" || !/^[a-zA-Z0-9 _-]{1,40}$/.test(label))) throw new Error("Issue labels must be an array of up to five safe label names");
+      rejectCredentialText(title + body);
+      return { title, body, labels };
+    }
+    case "github_pr_read": {
+      const number = Number(raw.number);
+      if (!Number.isSafeInteger(number) || number < 1 || number > 1000000) throw new Error("Pull request number must be a positive integer");
+      return { number };
+    }
+    case "github_actions_read": {
+      const limit = raw.limit === undefined ? 10 : Number(raw.limit);
+      const workflow = raw.workflow_file === undefined ? "" : boundedText(raw.workflow_file, "Workflow file", 1, 100);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 30 || (workflow && !/^[A-Za-z0-9_.-]+\.ya?ml$/i.test(workflow))) throw new Error("GitHub Actions query requires a valid workflow filename and limit 1–30");
+      return { workflow_file: workflow, limit };
+    }
+    case "cloudflare_observe": {
+      const scope = raw.scope === undefined ? "all" : raw.scope;
+      if (!["workers", "queues", "d1", "all"].includes(scope)) throw new Error("Cloudflare observation scope must be workers, queues, d1 or all");
+      return { scope };
+    }
+    case "sandbox_verify": {
+      const code = boundedText(raw.code, "Sandbox code", 1, 4000);
+      rejectCredentialText(code);
+      return { code };
+    }
+    case "financial_policy_prepare": {
+      const text = boundedText(raw.text, "Payment instruction", 1, 1000);
+      rejectCredentialText(text);
+      return { text };
+    }
+    case "memory_search": {
+      const query = boundedText(raw.query, "Memory search query", 2, 500);
+      rejectCredentialText(query);
+      return { query };
+    }
+    case "memory_write": {
+      const key = boundedText(raw.key, "Memory key", 1, 80).toLowerCase();
+      const value = boundedText(raw.value, "Memory value", 1, 1500);
+      if (!/^[a-z0-9][a-z0-9._-]{0,79}$/.test(key)) throw new Error("Memory key must use lowercase letters, numbers, dot, underscore or hyphen");
+      rejectCredentialText(key + " " + value);
+      return { key, value };
+    }
     case "repository_read":
       return { path: validateRepositoryPath(raw.path) };
     case "repository_write": {
@@ -84,6 +138,9 @@ export async function hashToolAction(action) {
 
 export function isSideEffectStep(step) {
   return step?.tool === "repository_write"
+    || step?.tool === "github_issue_create"
+    || step?.tool === "financial_policy_prepare"
+    || step?.tool === "memory_write"
     || step?.tool === "telegram_notify"
     || (step?.tool === "cloudflare_staging" && (step?.tool_input?.operation || "deploy") === "deploy");
 }
@@ -144,7 +201,7 @@ function pemBytes(pem) {
   return joinBytes(Uint8Array.of(0x30), derLength(inner.length), inner);
 }
 
-async function githubInstallationToken(env) {
+async function githubInstallationToken(env, requiredPermissions = {}) {
   const repository = String(env.TRANSACTRA_GITHUB_REPOSITORY || DEFAULT_REPOSITORY).trim();
   if (repository !== DEFAULT_REPOSITORY) throw new Error("GitHub adapter is restricted to the configured Transactra repository");
   const appId = String(env.GITHUB_APP_ID || "").trim();
@@ -162,6 +219,7 @@ async function githubInstallationToken(env) {
   );
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(signingInput));
   const jwt = signingInput + "." + base64Url(new Uint8Array(signature));
+  const requestedPermissions = { contents: "read", ...requiredPermissions };
   const response = await fetch("https://api.github.com/app/installations/" + installationId + "/access_tokens", {
     method: "POST",
     headers: {
@@ -172,7 +230,7 @@ async function githubInstallationToken(env) {
     },
     body: JSON.stringify({
       repositories: ["transactra"],
-      permissions: { contents: "write", actions: "write" },
+      permissions: requestedPermissions,
     }),
     redirect: "error",
     signal: AbortSignal.timeout(15000),
@@ -182,10 +240,13 @@ async function githubInstallationToken(env) {
   const grantedRepositories = Array.isArray(data.repositories)
     ? data.repositories.map((item) => item?.full_name).filter((name) => typeof name === "string")
     : [];
-  if (typeof data.token !== "string" || !data.token || !data.permissions
-      || data.permissions.contents !== "write" || data.permissions.actions !== "write"
+  const permissionsGranted = Object.entries(requestedPermissions).every(([name, level]) => {
+    const granted = data.permissions?.[name];
+    return level === "write" ? granted === "write" : granted === "read" || granted === "write";
+  });
+  if (typeof data.token !== "string" || !data.token || !data.permissions || !permissionsGranted
       || grantedRepositories.length !== 1 || grantedRepositories[0] !== DEFAULT_REPOSITORY) {
-    throw new Error("GitHub App installation token did not grant the exact repository and required permissions");
+    throw new Error("GitHub App installation token did not grant the exact repository and requested permissions; update the GitHub App installation permissions");
   }
   return { repository, token: data.token };
 }
@@ -227,7 +288,31 @@ function encodeBase64Utf8(value) {
   return btoa(binary);
 }
 
-async function research(query) {
+async function research(query, env = {}) {
+  const tavilyKey = typeof env.TAVILY_API_KEY === "string" ? env.TAVILY_API_KEY.trim() : "";
+  if (tavilyKey) {
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { authorization: "Bearer " + tavilyKey, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ query, search_depth: "advanced", max_results: 5, include_answer: false, include_raw_content: false }),
+      redirect: "error",
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) throw new Error("Tavily research returned HTTP " + response.status);
+    const data = await response.json();
+    const results = Array.isArray(data.results) ? data.results.slice(0, 5) : [];
+    return {
+      source: "Tavily web search",
+      query,
+      results: results.map((item) => ({
+        title: String(item.title || "").slice(0, 180),
+        excerpt: String(item.content || "").replace(/\s+/g, " ").slice(0, 700),
+        url: String(item.url || "").slice(0, 500),
+        score: Number.isFinite(item.score) ? item.score : null,
+        published_date: typeof item.published_date === "string" ? item.published_date.slice(0, 40) : null,
+      })).filter(item => /^https:\/\//i.test(item.url)),
+    };
+  }
   const url = new URL("https://en.wikipedia.org/w/rest.php/v1/search/page");
   url.searchParams.set("q", query);
   url.searchParams.set("limit", String(MAX_RESEARCH_RESULTS));
@@ -247,7 +332,123 @@ async function research(query) {
       excerpt: String(page.excerpt || page.description || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").slice(0, 450),
       url: "https://en.wikipedia.org/wiki/" + encodeURIComponent(String(page.title || "").replace(/ /g, "_")),
     })),
-    limitation: "Read-only public encyclopedia search; this adapter is not a general web search engine.",
+    limitation: "TAVILY_API_KEY is not configured; using read-only public encyclopedia search instead of general web search.",
+  };
+}
+
+async function cloudflareObserve(env, scope) {
+  const accountId = String(env.CLOUDFLARE_ACCOUNT_ID || "").trim();
+  const token = typeof env.CLOUDFLARE_READONLY_API_TOKEN === "string" ? env.CLOUDFLARE_READONLY_API_TOKEN.trim() : "";
+  if (!/^[a-f0-9]{32}$/i.test(accountId) || !token) throw new Error("Cloudflare read-only account token and account ID are required");
+  async function read(path) {
+    const response = await fetch("https://api.cloudflare.com/client/v4/accounts/" + accountId + path, {
+      headers: { authorization: "Bearer " + token, accept: "application/json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(12000),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data?.success !== true) throw new Error("Cloudflare read-only API returned HTTP " + response.status);
+    return Array.isArray(data.result) ? data.result : [];
+  }
+  const result = {};
+  if (scope === "workers" || scope === "all") {
+    result.workers = (await read("/workers/scripts")).slice(0, 30).map(item => ({
+      name: String(item.id || item.name || "").slice(0, 100),
+      modified_at: item.modified_on || null,
+    }));
+  }
+  if (scope === "queues" || scope === "all") {
+    result.queues = (await read("/queues")).slice(0, 30).map(item => ({
+      name: String(item.queue_name || "").slice(0, 100),
+      consumers: Array.isArray(item.consumers) ? item.consumers.length : null,
+      producers: Array.isArray(item.producers) ? item.producers.length : null,
+    }));
+  }
+  if (scope === "d1" || scope === "all") {
+    result.databases = (await read("/d1/database")).slice(0, 30).map(item => ({
+      name: String(item.name || "").slice(0, 100),
+      id: String(item.uuid || "").slice(0, 64),
+      version: item.version || null,
+    }));
+  }
+  return { account_id: accountId, read_only: true, observed_at: new Date().toISOString(), ...result };
+}
+
+async function sandboxVerify(env, code) {
+  if (!env.LOADER || typeof env.LOADER.load !== "function") throw new Error("Cloudflare Dynamic Worker Loader binding is not configured; isolated execution is unavailable");
+  const moduleSource = `
+    import { WorkerEntrypoint } from "cloudflare:workers";
+    function format(value) {
+      if (typeof value === "string") return value;
+      try { return JSON.stringify(value); } catch { return String(value); }
+    }
+    export class Code extends WorkerEntrypoint {
+      async run() {
+        const logs = [];
+        const sandboxConsole = {
+          log: (...values) => logs.push(values.map(format).join(" ").slice(0, 500)),
+          info: (...values) => logs.push(values.map(format).join(" ").slice(0, 500)),
+          warn: (...values) => logs.push(values.map(format).join(" ").slice(0, 500)),
+          error: (...values) => logs.push(values.map(format).join(" ").slice(0, 500)),
+        };
+        const result = await (async () => {
+          const console = sandboxConsole;
+          ${code}
+        })();
+        return { result: format(result).slice(0, 1200), logs: logs.slice(0, 20) };
+      }
+    }
+  `;
+  const sandbox = env.LOADER.load({
+    compatibilityDate: "2026-10-21",
+    mainModule: "code.js",
+    modules: { "code.js": moduleSource },
+    globalOutbound: null,
+    limits: { cpuMs: 10, subRequests: 0 },
+  });
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Isolated code execution exceeded the 5-second wall-clock limit")), 5000);
+  });
+  try {
+    const output = await Promise.race([sandbox.getEntrypoint("Code").run(), timeout]);
+    return { ...output, isolation: "Cloudflare Dynamic Worker", outbound_network: "blocked", cpu_limit_ms: 10, wall_limit_ms: 5000 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function financialPolicyPrepare(env, text) {
+  const rawBase = typeof env.TRANSACTRA_API_BASE_URL === "string" ? env.TRANSACTRA_API_BASE_URL.trim() : "";
+  let base;
+  try { base = new URL(rawBase); } catch { throw new Error("Transactra financial API base URL is not configured"); }
+  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) throw new Error("Financial API must use a configured HTTPS origin without credentials or query parameters");
+  const secret = typeof env.BACKEND_SHARED_SECRET === "string" ? env.BACKEND_SHARED_SECRET : "";
+  const ownerId = String(env.TELEGRAM_OWNER_ID || "").trim();
+  if (secret.length < 32 || !/^\d{1,20}$/.test(ownerId)) throw new Error("Authenticated owner identity or backend shared secret is unavailable");
+  const response = await fetch(new URL("/api/payments/prepare", base), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-transactra-edge-secret": secret,
+      "x-transactra-owner-id": ownerId,
+    },
+    body: JSON.stringify({ text }),
+    redirect: "error",
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || data?.ok !== true || typeof data.approvalId !== "string") {
+    throw new Error("Financial Policy Engine rejected or failed the payment preparation request: " + String(data?.error || "HTTP " + response.status).slice(0, 250));
+  }
+  return {
+    approval_id: data.approvalId,
+    intent: data.intent,
+    risk: data.risk,
+    policy_version: data.policyVersion,
+    expires_in_seconds: data.expiresInSeconds,
+    payment_executed: false,
+    next_action: "Owner must run /pay-approve " + data.approvalId + " to create the PayPal order, authorize it at PayPal, then run /pay-capture <order-id>. No funds were moved by preparation.",
   };
 }
 
@@ -274,7 +475,69 @@ export async function executeToolAdapter(env, tool, rawInput, context = {}) {
       }),
     };
   }
-  if (tool === "web_research") return { tool, status: "completed", output: JSON.stringify(await research(input.query)) };
+  if (tool === "web_research") return { tool, status: "completed", output: JSON.stringify(await research(input.query, env)) };
+  if (tool === "github_issues_read") {
+    const { token } = await githubInstallationToken(env, { issues: "read" });
+    const data = await githubRequest(env, "/issues?state=" + encodeURIComponent(input.state) + "&per_page=" + input.limit, "GET", undefined, token);
+    const rows = Array.isArray(data) ? data.filter(item => !item.pull_request).slice(0, input.limit) : [];
+    return { tool, status: "completed", output: JSON.stringify({ repository: DEFAULT_REPOSITORY, issues: rows.map(item => ({ number: item.number, title: String(item.title || "").slice(0, 180), state: item.state, url: item.html_url, updated_at: item.updated_at, labels: (item.labels || []).slice(0, 5).map(label => label.name) })) }) };
+  }
+  if (tool === "github_issue_create") {
+    const { token } = await githubInstallationToken(env, { issues: "write" });
+    const created = await githubRequest(env, "/issues", "POST", input, token);
+    return { tool, status: "completed", output: JSON.stringify({ repository: DEFAULT_REPOSITORY, issue_number: created.number, title: created.title, url: created.html_url, state: created.state }) };
+  }
+  if (tool === "github_pr_read") {
+    const { token } = await githubInstallationToken(env, { pull_requests: "read" });
+    const [pr, files] = await Promise.all([
+      githubRequest(env, "/pulls/" + input.number, "GET", undefined, token),
+      githubRequest(env, "/pulls/" + input.number + "/files?per_page=30", "GET", undefined, token),
+    ]);
+    return { tool, status: "completed", output: JSON.stringify({
+      repository: DEFAULT_REPOSITORY,
+      pull_request: { number: pr.number, title: pr.title, state: pr.state, draft: pr.draft, url: pr.html_url, base: pr.base?.ref, head: pr.head?.ref, head_sha: pr.head?.sha, mergeable_state: pr.mergeable_state, updated_at: pr.updated_at },
+      files: (Array.isArray(files) ? files : []).slice(0, 30).map(file => ({ filename: file.filename, status: file.status, additions: file.additions, deletions: file.deletions, changes: file.changes, patch: String(file.patch || "").slice(0, 900) })),
+    }) };
+  }
+  if (tool === "github_actions_read") {
+    const { token } = await githubInstallationToken(env, { actions: "read" });
+    const path = input.workflow_file
+      ? "/actions/workflows/" + encodeURIComponent(input.workflow_file) + "/runs?per_page=" + input.limit
+      : "/actions/runs?per_page=" + input.limit;
+    const data = await githubRequest(env, path, "GET", undefined, token);
+    const runs = Array.isArray(data.workflow_runs) ? data.workflow_runs : [];
+    return { tool, status: "completed", output: JSON.stringify({ repository: DEFAULT_REPOSITORY, total_count: data.total_count || 0, workflow_runs: runs.slice(0, input.limit).map(run => ({ id: run.id, name: run.name, run_number: run.run_number, event: run.event, status: run.status, conclusion: run.conclusion, url: run.html_url, head_sha: run.head_sha, created_at: run.created_at, updated_at: run.updated_at })) }) };
+  }
+  if (tool === "cloudflare_observe") return { tool, status: "completed", output: JSON.stringify(await cloudflareObserve(env, input.scope)) };
+  if (tool === "sandbox_verify") return { tool, status: "completed", output: JSON.stringify(await sandboxVerify(env, input.code)) };
+  if (tool === "financial_policy_prepare") return { tool, status: "completed", output: JSON.stringify(await financialPolicyPrepare(env, input.text)) };
+  if (tool === "memory_search") {
+    const ownerId = String(env.TELEGRAM_OWNER_ID || "").trim();
+    if (!/^\d{1,20}$/.test(ownerId) || !env.DB) throw new Error("Owner-scoped D1 memory is unavailable");
+    const now = new Date().toISOString();
+    const [provider, local] = await Promise.all([
+      searchMem0Memory(env.DB, env, ownerId, input.query, now),
+      env.DB.prepare("SELECT memory_key,memory_value,updated_at FROM agent_memory WHERE owner_id=? AND (expires_at IS NULL OR expires_at>?) ORDER BY updated_at DESC LIMIT 20").bind(ownerId, now).all(),
+    ]);
+    return { tool, status: "completed", output: JSON.stringify({
+      owner_scoped: true,
+      provider: provider.source,
+      provider_memories: (provider.memories || []).slice(0, 8),
+      local_memories: (local?.results || []).slice(0, 20).map(row => ({ key: row.memory_key, value: String(row.memory_value || "").slice(0, 1000), updated_at: row.updated_at })),
+      fallback_reason: provider.reason || null,
+    }) };
+  }
+  if (tool === "memory_write") {
+    const ownerId = String(env.TELEGRAM_OWNER_ID || "").trim();
+    if (!/^\d{1,20}$/.test(ownerId) || !env.DB) throw new Error("Owner-scoped D1 memory is unavailable");
+    const now = new Date().toISOString();
+    const memoryId = "mem-" + crypto.randomUUID();
+    await env.DB.prepare("INSERT INTO agent_memory (id,owner_id,memory_key,memory_value,source,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id,memory_key) DO UPDATE SET memory_value=excluded.memory_value,source=excluded.source,updated_at=excluded.updated_at")
+      .bind(memoryId, ownerId, input.key, input.value, "agent", now, now).run();
+    const syncId = await enqueueMem0Memory(env.DB, ownerId, input.key, input.value, now, "agent:" + String(context.taskId || "task") + ":" + String(context.stepId || "step"));
+    try { await env.EVENTS?.send?.({ type: "memory.sync", ownerId, queuedAt: now }); } catch {}
+    return { tool, status: "completed", output: JSON.stringify({ key: input.key, stored_in: "D1", mem0_sync: "queued", sync_event_id: syncId, owner_scoped: true }) };
+  }
   if (tool === "repository_read") {
     const { repository, token } = await githubInstallationToken(env);
     const encodedPath = input.path.split("/").map(encodeURIComponent).join("/");
@@ -302,7 +565,7 @@ export async function executeToolAdapter(env, tool, rawInput, context = {}) {
   if (tool === "repository_write") {
     const encodedPath = input.path.split("/").map(encodeURIComponent).join("/");
     let sha;
-    const { token } = await githubInstallationToken(env);
+    const { token } = await githubInstallationToken(env, { contents: "write" });
     const existing = await fetch("https://api.github.com/repos/" + DEFAULT_REPOSITORY + "/contents/" + encodedPath + "?ref=main", {
       method: "GET",
       headers: { authorization: "Bearer " + token, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" },
@@ -346,6 +609,7 @@ export async function executeToolAdapter(env, tool, rawInput, context = {}) {
     if (approvalDatabaseId !== "e7292f55-c90e-4d34-8b77-c97c3e5ec15a") {
       throw new Error("Staging dispatch is restricted to the dedicated transactra-staging D1 database");
     }
+    const { token } = await githubInstallationToken(env, { actions: "write" });
     const result = await githubRequest(env, "/actions/workflows/deploy-staging.yml/dispatches", "POST", {
       ref: "main",
       inputs: {
@@ -353,7 +617,7 @@ export async function executeToolAdapter(env, tool, rawInput, context = {}) {
         task_id: taskId, step_id: stepId, approval_id: approvalId,
         action_hash: actionHash, approval_database_id: approvalDatabaseId,
       },
-    });
+    }, token);
     return { tool, status: "dispatched", output: JSON.stringify({ repository: DEFAULT_REPOSITORY, workflow: "deploy-staging.yml", environment: "staging", dispatch: "accepted", deployment_complete: false, ...result }) };
   }
   if (tool === "telegram_notify") {

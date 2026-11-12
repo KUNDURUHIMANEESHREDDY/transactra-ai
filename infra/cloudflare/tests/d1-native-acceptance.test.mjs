@@ -407,8 +407,9 @@ test("staging readiness stays fail-closed until the D1-native approvals migratio
       new Request("https://staging.test/ready"),
       makeEnv(DB),
     );
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
+    const readinessBody = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(readinessBody));
+    assert.deepEqual(readinessBody, {
       ok: true,
       service: "transactra-edge",
       ready: true,

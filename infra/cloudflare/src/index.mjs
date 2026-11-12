@@ -11,7 +11,7 @@ const AI_MODEL = "@cf/zai-org/glm-4.7-flash";
 const AI_EXECUTION_ENABLED = false;
 const REQUIRED_D1_TABLES = ["inbound_events", "runtime_heartbeats", "telegram_reply_outbox", "tasks", "task_events", "task_runs", "task_run_events", "agent_memory", "task_memory", "orchestrator_jobs", "orchestrator_events", "orchestrator_step_runs", "orchestrator_step_approvals", "memory_usage_monthly", "memory_compaction_state", "memory_archives", "memory_sync_outbox"];
 const REQUIRED_D1_TASK_COLUMNS = ["pipeline_task_id", "approval_id", "pipeline_status", "pipeline_synced_at"];
-const REQUIRED_D1_OUTBOX_COLUMNS = ["business_connection_id"];
+const REQUIRED_D1_OUTBOX_COLUMNS = ["business_connection_id", "lease_token", "lease_until"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function hasTelegramBindings(env) {
@@ -58,6 +58,47 @@ function constantTimeEqual(a,b){if(typeof a!=="string"||typeof b!=="string"||a.l
 
 function telegramMessage(update){return update?.business_message||update?.message||null;}
 async function telegram(env,method,payload){const r=await fetch("https://api.telegram.org/bot"+env.TELEGRAM_BOT_TOKEN+"/"+method,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload),signal:AbortSignal.timeout(15000)});const data=await r.json().catch(()=>({ok:false,description:"Invalid Telegram response"}));if(!r.ok||!data.ok)throw new Error("Telegram "+method+" failed: "+(data.description||r.status));return data.result;}
+async function flushTelegramReplyOutbox(env,updateId=null,limit=10){
+ const now=new Date().toISOString();
+ const candidates=updateId
+  ? await env.DB.prepare("SELECT update_id FROM telegram_reply_outbox WHERE update_id=? AND status='pending' AND (lease_until IS NULL OR lease_until<=?) LIMIT 1").bind(updateId,now).all()
+  : await env.DB.prepare("SELECT update_id FROM telegram_reply_outbox WHERE status='pending' AND (lease_until IS NULL OR lease_until<=?) ORDER BY created_at LIMIT ?").bind(now,limit).all();
+ let sent=0;
+ for(const candidate of candidates?.results||[]){
+  const leaseToken=crypto.randomUUID(),leaseUntil=new Date(Date.parse(now)+60000).toISOString();
+  const claimed=await env.DB.prepare("UPDATE telegram_reply_outbox SET lease_token=?,lease_until=? WHERE update_id=? AND status='pending' AND (lease_until IS NULL OR lease_until<=?) RETURNING update_id,chat_id,thread_id,reply_text,business_connection_id")
+   .bind(leaseToken,leaseUntil,candidate.update_id,now).all();
+  const row=claimed?.results?.[0];
+  if(!row)continue;
+  const payload={chat_id:row.chat_id,text:row.reply_text,disable_web_page_preview:true};
+  if(row.business_connection_id)payload.business_connection_id=row.business_connection_id;
+  if(row.thread_id!==null&&row.thread_id!==undefined)payload.message_thread_id=row.thread_id;
+  try{
+   await telegram(env,"sendMessage",payload);
+   await env.DB.prepare("UPDATE telegram_reply_outbox SET status='sent',sent_at=?,lease_token=NULL,lease_until=NULL WHERE update_id=? AND lease_token=? AND status='pending'")
+    .bind(new Date().toISOString(),row.update_id,leaseToken).run();
+   sent++;
+  }catch(error){
+   await env.DB.prepare("UPDATE telegram_reply_outbox SET lease_token=NULL,lease_until=NULL WHERE update_id=? AND lease_token=? AND status='pending'").bind(row.update_id,leaseToken).run();
+   throw error;
+  }
+ }
+ return {sent};
+}
+async function financialApiRequest(env,path,method="POST",body={}){
+ const rawBase=typeof env.TRANSACTRA_API_BASE_URL==="string"?env.TRANSACTRA_API_BASE_URL.trim():"";
+ let base;try{base=new URL(rawBase);}catch{throw new Error("Transactra financial API URL is not configured");}
+ const secret=typeof env.BACKEND_SHARED_SECRET==="string"?env.BACKEND_SHARED_SECRET:"";
+ const owner=String(env.TELEGRAM_OWNER_ID||"").trim();
+ if(base.protocol!=="https:"||base.username||base.password||base.search||base.hash||secret.length<32||!/^\d{1,20}$/.test(owner))throw new Error("Authenticated financial API configuration is unavailable or invalid");
+ const response=await fetch(new URL(path,base),{
+  method,headers:{"content-type":"application/json","x-transactra-edge-secret":secret,"x-transactra-owner-id":owner},
+  body:method==="GET"?undefined:JSON.stringify(body),redirect:"error",signal:AbortSignal.timeout(15000)
+ });
+ const data=await response.json().catch(()=>null);
+ if(!response.ok)throw new Error(String(data?.error||"Financial API returned HTTP "+response.status).slice(0,300));
+ return data;
+}
 async function recordTelegramWebhookDiagnostic(env,now,diagnostic){
  await env.DB.prepare("INSERT INTO inbound_events (source,source_event_id,event_type,payload_json,received_at) VALUES (?,?,?,?,?) ON CONFLICT(source,source_event_id) DO UPDATE SET event_type=excluded.event_type,payload_json=excluded.payload_json,received_at=excluded.received_at").bind("telegram_admin","webhook-info","telegram.webhook_info",JSON.stringify(diagnostic),now).run();
 }
@@ -208,7 +249,10 @@ export async function makeReply(update,env){
  const m=telegramMessage(update);if(!m||typeof m.text!=="string")return null;
  if(!m.from||String(m.from.id)!==String(env.TELEGRAM_OWNER_ID)||m.chat?.type!=="private")return null;
  const text=m.text.trim(), command=(text.split(/\s+/,1)[0]||"").split("@")[0].toLowerCase();
- if(command==="/start"||command==="/help")return "Transactra control\n\n/status — service and event-ingestion readiness\n/nvidia on|off|status — owner-only model service control\n/cloudpilot status|test — inspect or test the CloudPilot connection\n/provider — inference provider configuration\n/innovate — evaluate or propose next 48-hour project candidate (>= 90/100 threshold)\n/task <description> — submit a task for owner approval\n/remember <key> <value> — save durable agent memory\n/memory — list memory and quota usage\n/memory-status — inspect quota and compaction state\n/forget <key> — delete saved memory\n/orchestrator — inspect job and recovery state\n/tasks — list recent tasks\n/task-status <task-id> — inspect a task\n/approvals — list pending task approvals\n/approve <approval-id> <reason> — approve task execution\n/reject <approval-id> <reason> — reject task execution\n/step-approvals — list pending per-step approvals\n/step-approval <approval-id> — inspect the exact approved action\n/approve-step <approval-id> <hash-prefix> <reason> — approve one exact step action\n/reject-step <approval-id> <hash-prefix> <reason> — reject one exact step action\n/help — show commands\n\nCloudPilot Edge is Transactra's inference gateway to NVIDIA NIM. Model execution defaults OFF; CloudPilot enforces the INR 0 policy and quota. Task execution and payment actions remain subject to separate owner approvals."+(isD1NativePlanner(env)?"\n\nPlanner: Cloudflare D1-native; task plans and approvals are stored locally. Approval does not start execution.":"\n\nPlanner: legacy authenticated bridge.");
+ if(!command.startsWith("/")&&/^(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:build|create|research|investigate|analyze|analyse|fix|update|monitor|compare|find|automate|organize|design|deploy|implement|prepare|pay|transfer|schedule|send|write|review|audit|summarize|summarise)\b/i.test(text)){
+  return makeReply({...update,business_message:null,message:{...m,text:"/goal "+text}},env);
+ }
+ if(command==="/start"||command==="/help")return "Transactra control\n\n/status — service and event-ingestion readiness\n/nvidia on|off|status — owner-only model service control\n/cloudpilot status|test — inspect or test the CloudPilot connection\n/provider — inference provider configuration\n/innovate — evaluate or propose next 48-hour project candidate (>= 90/100 threshold)\n/task or /goal <objective> — submit an objective for owner approval\n/remember <key> <value> — save durable agent memory\n/memory — list memory and quota usage\n/memory-status — inspect quota and compaction state\n/forget <key> — delete saved memory\n/orchestrator — inspect job and recovery state\n/tasks — list recent tasks\n/task-status <task-id> — inspect a task\n/report <task-id> — retrieve the evidence-backed final report\n/pay-approve <approval-id> — create a PayPal order after policy approval\n/pay-capture <order-id> — capture only after PayPal buyer authorization\n/approvals — list pending task approvals\n/approve <approval-id> <reason> — approve task execution\n/reject <approval-id> <reason> — reject task execution\n/step-approvals — list pending per-step approvals\n/step-approval <approval-id> — inspect the exact approved action\n/approve-step <approval-id> <hash-prefix> <reason> — approve one exact step action\n/reject-step <approval-id> <hash-prefix> <reason> — reject one exact step action\n/help — show commands\n\nCloudPilot Edge routes inference to NVIDIA NIM. Model execution defaults OFF; zero-cost enforcement and quota settlement remain with CloudPilot, with owner approval for task execution and payments."+(isD1NativePlanner(env)?"\n\nPlanner: Cloudflare D1-native; task plans and approvals are stored locally. Approval does not start execution.":"\n\nPlanner: legacy authenticated bridge.");
  const normalizedText=text.toLowerCase().replace(/[.!?]+$/,"").replace(/\s+/g," ");
  let nvidiaAction=null;
  if(command==="/nvidia"){
@@ -307,8 +351,8 @@ export async function makeReply(update,env){
    return result.deleted>0?"Deleted durable memory key from Transactra D1: "+key:"No memory found for key: "+key;
   }catch(error){return "Memory was not deleted. Mem0 deletion could not be confirmed; retry after the provider recovers. Error: "+String(error?.message||"unknown").slice(0,120);}
  }
- if(command==="/task"&&isD1NativePlanner(env)){
-  const description=text.replace(/^\/task(?:@\w+)?\s*/i,"").trim();
+ if((command==="/task"||command==="/goal")&&isD1NativePlanner(env)){
+  const description=text.replace(/^\/(?:task|goal)(?:@\w+)?\s*/i,"").trim();
   if(!description)return "Usage: /task <description>\n\nThe D1-native planner saves a reviewable draft and waits for your approval. Execution remains disabled."; 
   if(description.length>4000)return "Task description is too long. Please keep it under 4,000 characters.";
   const taskId="tg-"+String(update.update_id),now=new Date().toISOString();
@@ -316,8 +360,8 @@ export async function makeReply(update,env){
   if(!approval)return "Task saved, but the approval record could not be loaded. No execution was started.";
   return "Task saved by the D1-native planner\nTask ID: "+taskId+"\nStatus: "+approval.status+"\nApproval ID: "+approval.id+"\nExpires: "+approval.expires_at+"\n\nReview with /approvals. Approve using /approve "+approval.id+" <reason>. Approval does not start execution; inference remains disabled."; 
  }
- if(command==="/task"){
-  const description=text.replace(/^\/task(?:@\w+)?\s*/i,"").trim();
+ if(command==="/task"||command==="/goal"){
+  const description=text.replace(/^\/(?:task|goal)(?:@\w+)?\s*/i,"").trim();
   if(!description)return "Usage: /task <what you want Transactra to do>\n\nTasks are saved durably, but execution remains paused until the production NVIDIA entitlement is confirmed and the service is enabled.";
   if(description.length>4000)return "Task description is too long. Please keep it under 4,000 characters.";
   const taskId="tg-"+String(update.update_id), now=new Date().toISOString();
@@ -377,7 +421,8 @@ export async function makeReply(update,env){
   const decision=command==="/approve-step"?"approved":"rejected",now=new Date().toISOString();
   const result=await decideD1NativeStepApproval(env,approvalId,String(env.TELEGRAM_OWNER_ID),decision,hashPrefix,reason,now);
   if(!result.ok)return result.message;
-  return "Step "+decision+"\nTask: "+result.taskId+"\nStep: "+result.stepId+"\nApproval: "+approvalId+"\nAction hash: "+result.actionHash+"\n"+(decision==="approved"?"The exact approved action is queued for the next 15-minute dispatcher cycle. The approval is single-use.":"The step and remaining task execution are cancelled.");
+  if(decision==="approved"){try{await env.EVENTS.send({type:"orchestrator.dispatch",taskId:result.taskId});}catch{}}
+  return "Step "+decision+"\nTask: "+result.taskId+"\nStep: "+result.stepId+"\nApproval: "+approvalId+"\nAction hash: "+result.actionHash+"\n"+(decision==="approved"?"The exact approved action was added to the durable agent-dispatch queue. The 15-minute scheduler remains the recovery backstop. The approval is single-use.":"The step and remaining task execution are cancelled.");
  }
  if((command==="/approve"||command==="/reject")&&isD1NativePlanner(env)){
   const parts=text.split(/\s+/),approvalId=parts[1]||"",reason=parts.slice(2).join(" ").trim();
@@ -385,7 +430,8 @@ export async function makeReply(update,env){
   const decision=command==="/approve"?"approved":"rejected",now=new Date().toISOString();
   const result=await decideD1NativeApproval(env,approvalId,String(env.TELEGRAM_OWNER_ID),decision,reason,now);
   if(!result.ok)return result.message;
-  return "Task "+decision+" in the D1-native planner\nTask ID: "+result.taskId+"\nApproval: "+approvalId+"\n"+(decision==="approved"?"Execution remains blocked until inference is independently verified and enabled. No job was dispatched.":"The task is cancelled; no execution was dispatched.");
+  if(decision==="approved"){try{await env.EVENTS.send({type:"orchestrator.dispatch",taskId:result.taskId});}catch{}}
+  return "Task "+decision+" in the D1-native planner\nTask ID: "+result.taskId+"\nApproval: "+approvalId+"\n"+(decision==="approved"?"The approved task was added to the durable agent-dispatch queue. Execution remains blocked until the runtime, inference, and per-step approval gates pass.":"The task is cancelled; no execution was dispatched.");
  }
  if(command==="/approve"||command==="/reject"){
   const parts=text.split(/\s+/),approvalId=parts[1]||"",reason=parts.slice(2).join(" ").trim();
@@ -424,6 +470,25 @@ export async function makeReply(update,env){
   const rows=result?.results||[];
   if(!rows.length)return "No tasks saved yet. Send /task <description> to create one.";
   return "Recent Transactra tasks\n\n"+rows.map((t,i)=>(i+1)+". ["+taskDisplayState(t)+"] "+t.description.slice(0,180)+"\nID: "+t.id+"\nPlanner: "+(t.pipeline_task_id||"not linked")+"\nApproval: "+(t.approval_id||"none")+"\nAttempts: "+(t.attempt_count??0)).join("\n\n");
+ }
+ if(command==="/report"){
+  const taskId=text.split(/\s+/)[1]||"";
+  if(!/^tg-[A-Za-z0-9_-]{1,80}$/.test(taskId))return "Usage: /report <task-id>";
+  const report=await env.DB.prepare("SELECT detail FROM task_events WHERE task_id=? AND event_type='task.final_report' ORDER BY created_at DESC LIMIT 1").bind(taskId).first();
+  return typeof report?.detail==="string"&&report.detail.trim()?report.detail:"No evidence-backed final report is available. The task may still be running or awaiting review.";
+ }
+ if(command==="/pay-approve"){
+  const approvalId=text.split(/\s+/)[1]||"";
+  if(!UUID.test(approvalId))return "Usage: /pay-approve <payment-approval-id>";
+  const order=await financialApiRequest(env,"/api/orders","POST",{approvalId});
+  if(typeof order.orderId!=="string"||typeof order.approveUrl!=="string")return "The Financial Policy Engine did not return a valid PayPal checkout order. No capture was attempted.";
+  return "Payment approval challenge consumed by the Financial Policy Engine.\nPayPal order: "+order.orderId+"\nRisk: "+(order.risk||"reviewed")+"\nPolicy: "+(order.policyVersion||"verified")+"\n\nComplete buyer authorization at this PayPal URL:\n"+order.approveUrl+"\n\nAfter PayPal confirms authorization, send /pay-capture "+order.orderId+". No funds have been captured yet.";
+ }
+ if(command==="/pay-capture"){
+  const orderId=text.split(/\s+/)[1]||"";
+  if(!/^[A-Z0-9]{8,40}$/.test(orderId))return "Usage: /pay-capture <paypal-order-id>";
+  const capture=await financialApiRequest(env,"/api/orders/"+encodeURIComponent(orderId)+"/capture","POST",{});
+  return "PayPal capture response\nOrder: "+orderId+"\nStatus: "+String(capture.status||"UNKNOWN")+"\n"+(capture.status==="COMPLETED"?"Payment capture is confirmed by PayPal.": "PayPal has not confirmed a completed capture. Check the transaction status before retrying.");
  }
  if(command==="/task-status"){
   const taskId=text.split(/\s+/)[1]||"";
@@ -531,7 +596,7 @@ export default {
      const placeholders=required.map(()=>"?").join(",");
      const tables=await env.DB.prepare("SELECT COUNT(*) AS total FROM sqlite_master WHERE type='table' AND name IN ("+placeholders+")").bind(...required).first();
      const columns=await env.DB.prepare("SELECT COUNT(*) AS total FROM pragma_table_info('tasks') WHERE name IN ('pipeline_task_id','approval_id','pipeline_status','pipeline_synced_at')").first();
-     const outboxColumns=await env.DB.prepare("SELECT COUNT(*) AS total FROM pragma_table_info('telegram_reply_outbox') WHERE name IN ('business_connection_id')").first();
+     const outboxColumns=await env.DB.prepare("SELECT COUNT(*) AS total FROM pragma_table_info('telegram_reply_outbox') WHERE name IN ('business_connection_id','lease_token','lease_until')").first();
      if(Number(tables?.total)!==required.length||Number(columns?.total)!==REQUIRED_D1_TASK_COLUMNS.length||Number(outboxColumns?.total)!==REQUIRED_D1_OUTBOX_COLUMNS.length)return json({ok:false,service:"transactra-edge",ready:false,planner:"d1-native"},503);
     }catch{return json({ok:false,service:"transactra-edge",ready:false,planner:"d1-native"},503);}
     const mem0Health=await env.DB.prepare("SELECT id,scheduled_at FROM runtime_heartbeats WHERE id LIKE 'mem0-health:%' ORDER BY scheduled_at DESC LIMIT 1").first();
@@ -548,7 +613,7 @@ export default {
     const placeholders=REQUIRED_D1_TABLES.map(()=>"?").join(",");
     const tables=await env.DB.prepare("SELECT COUNT(*) AS total FROM sqlite_master WHERE type='table' AND name IN ("+placeholders+")").bind(...REQUIRED_D1_TABLES).first();
     const columns=await env.DB.prepare("SELECT COUNT(*) AS total FROM pragma_table_info('tasks') WHERE name IN ('pipeline_task_id','approval_id','pipeline_status','pipeline_synced_at')").first();
-    const outboxColumns=await env.DB.prepare("SELECT COUNT(*) AS total FROM pragma_table_info('telegram_reply_outbox') WHERE name IN ('business_connection_id')").first();
+    const outboxColumns=await env.DB.prepare("SELECT COUNT(*) AS total FROM pragma_table_info('telegram_reply_outbox') WHERE name IN ('business_connection_id','lease_token','lease_until')").first();
     if(Number(tables?.total)!==REQUIRED_D1_TABLES.length||Number(columns?.total)!==REQUIRED_D1_TASK_COLUMNS.length||Number(outboxColumns?.total)!==REQUIRED_D1_OUTBOX_COLUMNS.length)return json({ok:false,service:"transactra-edge",ready:false},503);
     const pipelineHealth=await pipelineHealthRequest(env);
     if(pipelineHealth.service!=="transactra-control-plane"||pipelineHealth.scope!=="database-schema"||pipelineHealth.status!=="ready"||pipelineHealth.database!=="connected")return json({ok:false,service:"transactra-edge",ready:false},503);
@@ -576,6 +641,19 @@ export default {
   if(!env.DB||!env.TELEGRAM_BOT_TOKEN||!env.TELEGRAM_OWNER_ID)throw new Error("Telegram response bindings are not configured");
   for(const message of batch.messages){
    const event=message.body;
+   if(event?.type==="orchestrator.dispatch"&&isD1NativePlanner(env)&&/^tg-[A-Za-z0-9_-]{1,80}$/.test(String(event.taskId||""))){
+    const now=new Date().toISOString();
+    const dispatch=await processD1NativeApprovedJobs(env,Date.now(),now);
+    const finalized=await finalizeD1NativeCompletedJobs(env,now);
+    console.log(JSON.stringify({event:"orchestrator_dispatch",task_id:event.taskId,dispatched:dispatch?.dispatched||0,finalized:finalized?.finalized||0,reason:dispatch?.reason||null}));
+    message.ack();
+    continue;
+   }
+   if(event?.type==="telegram.outbox.flush"){
+    await flushTelegramReplyOutbox(env,typeof event.updateId==="string"?event.updateId:null,10);
+    message.ack();
+    continue;
+   }
    if(event?.type==="memory.health_check"&&typeof event.ownerId==="string"&&event.ownerId===String(env.TELEGRAM_OWNER_ID)){
     const result=await checkMem0Connectivity(env,event.ownerId);
     const checkedAt=new Date().toISOString();
@@ -596,14 +674,7 @@ export default {
    if(!reply||!m?.chat?.id){message.ack();continue;}
    const updateId=String(event.updateId), chatId=String(m.chat.id), threadId=await resolveTelegramThreadId(env,update,chatId,updateId), businessConnectionId=typeof m.business_connection_id==="string"?m.business_connection_id:null;
    await env.DB.prepare("INSERT OR IGNORE INTO telegram_reply_outbox (update_id,chat_id,thread_id,reply_text,status,created_at,business_connection_id) VALUES (?,?, ?,?,'pending',?,?)").bind(updateId,chatId,threadId,reply,new Date().toISOString(),businessConnectionId).run();
-   const outbox=await env.DB.prepare("SELECT chat_id,thread_id,reply_text,status,business_connection_id FROM telegram_reply_outbox WHERE update_id=?").bind(updateId).first();
-   if(outbox?.status!=="sent"){
-    const payload={chat_id:outbox.chat_id,text:outbox.reply_text,disable_web_page_preview:true};
-    if(outbox.business_connection_id)payload.business_connection_id=outbox.business_connection_id;
-    if(outbox.thread_id!==null&&outbox.thread_id!==undefined)payload.message_thread_id=outbox.thread_id;
-    await telegram(env,"sendMessage",payload);
-    await env.DB.prepare("UPDATE telegram_reply_outbox SET status='sent',sent_at=? WHERE update_id=?").bind(new Date().toISOString(),updateId).run();
-   }
+   await flushTelegramReplyOutbox(env,updateId,1);
    message.ack();
   }
  },
@@ -613,6 +684,7 @@ export default {
    const now=new Date(controller.scheduledTime).toISOString();
    await env.DB.prepare("INSERT INTO runtime_heartbeats (id,scheduled_at) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET scheduled_at=excluded.scheduled_at").bind("scheduler",now).run();
    await ensureTelegramWebhook(env,now);
+   await flushTelegramReplyOutbox(env,null,10);
    await env.DB.prepare("DELETE FROM agent_memory WHERE expires_at IS NOT NULL AND expires_at<=?").bind(now).run();
    if(env.TELEGRAM_OWNER_ID){
     const memoryStatus=await getMemoryStatus(env.DB,env,String(env.TELEGRAM_OWNER_ID),now);

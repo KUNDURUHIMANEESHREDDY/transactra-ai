@@ -1,5 +1,19 @@
 # Production release gates
 
+## Current live-state checkpoint — 2026-11-12
+
+This checkpoint supersedes historical deployment notes below. A direct Cloudflare API check found:
+
+- `transactra-edge`: absent (direct Worker-script lookup returned 404).
+- `transactra-edge-staging`: absent (direct Worker-script lookup returned 404).
+- `transactra-telegram`: present, with Telegram bot/webhook secrets and owner identity, but its `DB` binding points to `cloudpilot-staging` (`e7292f55-c90e-4d34-8b77-c97c3e5ec15a`); the inspected settings did not include the `transactra-events` Queue binding.
+- Production D1 `transactra` (`faf1f8b5-e029-4598-9fb0-c3cb1106d311`) and `transactra-events` / `transactra-events-dlq` queues exist. A dedicated staging D1 (`transactra-staging`, `312d97f4-47b4-4084-84d5-21c5fe9c5538`) and staging queues were provisioned on 2026-11-12; the staging Worker itself remains absent.
+
+Therefore the existing Telegram Worker is not connected to the intended Transactra production D1/Queue runtime. Do not describe the production Telegram workforce as connected, and do not deploy the new Worker until the correct production secrets, queue/D1 bindings, GitHub App scopes and protected release gates are ready. No webhook was changed during this build.
+
+The source now includes the expanded D1-native workforce, real tool adapters, role-specific tool grants, Dynamic Worker sandbox configuration, queue dispatch, evidence-backed reports and migration 0017 (after model-registry migration 0016). These are source-level changes only until a staging Worker is deployed and passes the acceptance suite.
+
+
 Transactra production releases are deliberately manual and approval-gated. A green build alone is not production authorization.
 
 ## Automated gates
@@ -57,7 +71,7 @@ The workflow cannot create GitHub Environment protection rules or secrets. Produ
 ## Release procedure
 
 1. Merge workforce hardening and release-gate changes only after CI passes.
-2. Deploy staging manually and verify migrations, Telegram task intake, task creation, approval/rejection, duplicate webhook idempotency, approval expiry, queue retry, persisted recovery and live readiness.
+2. Deploy staging manually and apply migrations 0001–0017 to staging D1 only (including model registry migration 0016). Verify Telegram objective intake, all ten Node catalogue role IDs, least-privilege tool grants, GitHub issue/PR/Actions scopes, Tavily source links, Cloudflare read-only observation, Dynamic Worker Loader isolation, payment-policy preparation (without capture), task/step approval, durable queue continuation, queue retry, D1 lease recovery, final report persistence/delivery, duplicate webhook idempotency, approval expiry and `/ready`.
 3. Verify production environment reviewers and production-scoped secrets.
 4. Verify Cloudflare Free plan and quota headroom in the dashboard.
 5. Run **Transactra Production Deploy** from `main`; type `DEPLOY`.
@@ -114,9 +128,13 @@ Do not use the previously exposed production Telegram bot token. Rotate it throu
 
 ## Remaining production blockers
 
-- Production remains on the legacy planner bridge; staging D1-native acceptance does not authorize a production cutover. Require a separate parity review, explicit owner approval, and a tested rollback path.
-- The previously exposed production Telegram credential must be revoked/rotated through BotFather and the replacement stored only in the protected production secret store.
-- The `transactra-production` environment still needs required reviewers/deployment protection, main-only deployment restriction, and its own least-privilege Cloudflare token.
+- The intended `transactra-edge` production Worker and `transactra-edge-staging` staging Worker are absent in the current Cloudflare account. The existing `transactra-telegram` Worker is bound to `cloudpilot-staging` D1 and has no inspected `transactra-events` queue binding. Do not cut over the live bot until the correct Worker is deployed with the production D1/Queue bindings.
+- The production D1 database has not been verified as migrated through 0017. The staging Worker is absent and staging acceptance must be repeated against the current code and schema.
+- The previously exposed production Telegram credential must be revoked/rotated through BotFather and the replacement stored only in the protected production secret store. The new Worker must receive its own Telegram token and webhook secret before the webhook is moved.
+- The `transactra-production` environment still needs required reviewers/deployment protection, main-only deployment restriction, its own least-privilege Cloudflare token and an explicit secret-provisioning procedure for the new Worker.
+- The GitHub App installation must grant Contents read/write, Issues read/write, Pull requests read and Actions read/write on only the Transactra repository. Its token exchange must be verified before enabling GitHub tools.
+- Cloudflare Dynamic Worker Loader availability and account-plan eligibility are unverified. The sandbox must pass a staging isolation test; do not accept a paid plan or add a billing method to satisfy this gate.
+- The optional Cloudflare read-only token and Tavily key must be scoped and installed if those integrations are to be active. Financial policy preparation remains blocked until the authenticated PostgreSQL-backed API URL and matching backend shared secret are configured.
 - Cloudflare Free/no-card eligibility and current quota headroom must be verified in the dashboard; the API connection cannot independently attest billing state.
 - Durable off-database backup and isolated restore remain incomplete. The current encrypted Actions artifact is retained for 30 days and is not permanent archival storage; R2 is not enabled on the account.
 - The production D1 backup workflow's current push-triggered run had zero jobs; no production export or restore is claimed. A manual protected-environment dispatch with the required secrets is still required.

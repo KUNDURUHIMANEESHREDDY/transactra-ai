@@ -1,6 +1,7 @@
 import { evaluateOrchestratorStep, replanOrchestratorFailure, validateApprovedExecutionPlan, requiresOwnerStepApproval } from "./orchestrator.mjs";
 import { runAgentWorker, isAgentExecutionEnabled } from "./agent-runtime.mjs";
 import { buildToolAction, hashToolAction } from "./tool-adapters.mjs";
+import { buildFinalReport } from "./final-report.mjs";
 
 export function hasAcceptedStepEvidence(rows) {
   return Array.isArray(rows) && rows.length > 0 && rows.every(row => {
@@ -38,19 +39,23 @@ export async function finalizeD1NativeCompletedJobs(env, now) {
       let plan;
       try { plan = validateApprovedExecutionPlan(JSON.parse(job.plan_json)); }
       catch { throw new Error("Stored execution plan failed finalization validation"); }
-      const ledger = await env.DB.prepare("SELECT step_id,sequence_no,status,attempt_count,result_text,evaluation_json FROM orchestrator_step_runs WHERE task_id=? ORDER BY sequence_no").bind(job.task_id).all();
+      const ledger = await env.DB.prepare("SELECT step_id,sequence_no,agent,tool,status,attempt_count,result_text,evaluation_json FROM orchestrator_step_runs WHERE task_id=? ORDER BY sequence_no").bind(job.task_id).all();
       const rows = ledger?.results || [];
       if (rows.length !== plan.steps.length || !hasAcceptedStepEvidence(rows)) {
         await env.DB.prepare("UPDATE orchestrator_jobs SET status='blocked',lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND lease_token=?").bind(now,job.id,lease).run();
         continue;
       }
+      const report = buildFinalReport({ taskId: job.task_id, objective: plan.objective, steps: rows });
       await env.DB.batch([
         env.DB.prepare("UPDATE execution_plans SET status='completed',updated_at=? WHERE task_id=? AND status='approved'").bind(now,job.task_id),
         env.DB.prepare("UPDATE tasks SET status='succeeded',updated_at=? WHERE id=? AND status IN ('awaiting_provider','running')").bind(now,job.task_id),
         env.DB.prepare("UPDATE task_runs SET state='succeeded',completed_at=?,updated_at=? WHERE task_id=? AND state IN ('awaiting_provider','queued','running')").bind(now,now,job.task_id),
         env.DB.prepare("UPDATE orchestrator_jobs SET status='linked',lease_token=NULL,lease_until=NULL,last_error=NULL,completed_at=?,updated_at=? WHERE id=? AND lease_token=?").bind(now,now,job.id,lease),
         env.DB.prepare("INSERT INTO orchestrator_events (job_id,task_id,event_type,detail,created_at) VALUES (?,?,?,?,?)").bind(job.id,job.task_id,"orchestrator.completed","All approved agent steps have persisted accepted evaluator evidence.",now),
+        env.DB.prepare("INSERT OR IGNORE INTO task_events (task_id,event_type,detail,created_at) VALUES (?,?,?,?)").bind(job.task_id,"task.final_report",report,now),
+        env.DB.prepare("INSERT OR IGNORE INTO telegram_reply_outbox (update_id,chat_id,thread_id,reply_text,status,created_at) VALUES (?,?,NULL,?,'pending',?)").bind("report:"+job.task_id,ownerId,report,now),
       ]);
+      try { await env.EVENTS?.send?.({ type: "telegram.outbox.flush", updateId: "report:" + job.task_id }); } catch {}
       finalized++;
     } catch (error) {
       const message = String(error?.message || "Evidence-backed task finalization failed").slice(0,500);
@@ -172,7 +177,7 @@ export async function processD1NativeApprovedJobs(env, scheduledTime, now) {
         await env.DB.prepare("INSERT OR IGNORE INTO orchestrator_step_runs (id,task_id,step_id,sequence_no,agent,tool,status,attempt_count,input_json,created_at,updated_at) VALUES (?,?,?,?,?,?,'queued',0,?,?,?)").bind(job.task_id+":"+step.id,job.task_id,step.id,i+1,step.agent,step.tool,JSON.stringify({description:step.description,acceptance_criteria:step.acceptance_criteria,risk:step.risk,depends_on:step.depends_on,tool_input:step.tool_input}),now,now).run();
       }
       await env.DB.prepare("UPDATE orchestrator_step_runs SET status='needs_review',lease_token=NULL,lease_until=NULL,last_error='Previous agent lease expired; replay withheld to avoid duplicate side effects',updated_at=? WHERE task_id=? AND status='leased' AND lease_until<=?").bind(now,job.task_id,now).run();
-      const ledger=await env.DB.prepare("SELECT step_id,sequence_no,status,attempt_count,result_text,evaluation_json FROM orchestrator_step_runs WHERE task_id=? ORDER BY sequence_no").bind(job.task_id).all();
+      const ledger=await env.DB.prepare("SELECT step_id,sequence_no,agent,tool,status,attempt_count,result_text,evaluation_json FROM orchestrator_step_runs WHERE task_id=? ORDER BY sequence_no").bind(job.task_id).all();
       const rows=ledger?.results||[];
       if(rows.length!==plan.steps.length)throw new Error("Step ledger does not match approved plan");
       if (rows.every(row => row.status === "succeeded") && !hasAcceptedStepEvidence(rows)) {
@@ -271,6 +276,7 @@ export async function processD1NativeApprovedJobs(env, scheduledTime, now) {
         env.DB.prepare("INSERT INTO orchestrator_events (job_id,task_id,event_type,detail,created_at) VALUES (?,?,?,?,?)").bind(job.id,job.task_id,"orchestrator.agent_succeeded","Agent "+step.agent+" completed "+pending.step_id+"; evaluator accepted evidence.",now),
         env.DB.prepare("UPDATE orchestrator_jobs SET status='blocked',lease_token=NULL,lease_until=NULL,last_error=NULL,updated_at=? WHERE id=? AND lease_token=?").bind(now,job.id,lease)
       ]);
+      try { await env.EVENTS?.send?.({ type: "orchestrator.dispatch", taskId: job.task_id }); } catch {}
       dispatched++;
     } catch(error) {
       const message=String(error?.message||"Orchestrator dispatch failed").slice(0,500);

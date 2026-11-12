@@ -1,8 +1,17 @@
 import { isNvidiaNimConfigured } from "./nvidia-nim.mjs";
 import { completeCloudPilot, isCloudPilotConfigured } from "./cloudpilot.mjs";
 import { buildToolAction, executeToolAdapter, hashToolAction, isSideEffectStep } from "./tool-adapters.mjs";
+import { isAgentToolAllowed } from "./orchestrator.mjs";
 
-const AGENTS = new Set(["researcher", "analyst", "builder", "operator", "verifier"]);
+const AGENTS = new Set([
+  "researcher", "analyst", "builder", "operator", "verifier",
+  "engineering_lead", "quality_engineer", "product_researcher",
+  "site_reliability_engineer", "security_officer", "innovation_architect",
+  "finance_officer", "workforce_manager", "org_orchestrator",
+  "org-orchestrator", "workforce-manager", "engineering-lead", "software-engineer",
+  "quality-engineer", "product-researcher", "innovation-architect",
+  "site-reliability-engineer", "security-officer", "evolution-engineer",
+]);
 
 export function isAgentExecutionEnabled(env) {
   return env.TRANSACTRA_AGENT_EXECUTION_ENABLED === "true"
@@ -17,7 +26,7 @@ export function isAgentExecutionEnabled(env) {
  * SHA-256 hash of the exact step and action payload.
  */
 export async function runAgentWorker(env, step, context = {}) {
-  if (!step || !AGENTS.has(step.agent)) {
+  if (!step || !AGENTS.has(step.agent) || !isAgentToolAllowed(step.agent, step.tool)) {
     return { status: "blocked", error: "Unknown agent worker; no dispatch performed." };
   }
 

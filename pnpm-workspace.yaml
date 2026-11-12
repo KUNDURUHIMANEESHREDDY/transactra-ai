@@ -1,3 +1,8 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# Explicitly allow esbuild's platform-binary setup during frozen CI installs.
+allowBuilds:
+  esbuild: true
+  workerd: true

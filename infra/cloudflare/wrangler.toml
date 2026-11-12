@@ -3,6 +3,10 @@ main = "src/index.mjs"
 compatibility_date = "2026-11-09"
 workers_dev = true
 
+# Isolated execution for agent-generated code. Dynamic Workers have no outbound network.
+[[worker_loaders]]
+binding = "LOADER"
+
 # Cloudflare resources provisioned for Transactra. No credentials are stored here.
 [[d1_databases]]
 binding = "DB"
@@ -30,6 +34,7 @@ MEM0_MONTHLY_ADDITION_LIMIT = "10000"
 MEM0_MONTHLY_RETRIEVAL_LIMIT = "1000"
 MEM0_COMPACTION_THRESHOLD_PERCENT = "70"
 TRANSACTRA_ENV = "production"
+CLOUDFLARE_ACCOUNT_ID = "e15f135fd5ae49e30f892777aebec675"
 TRANSACTRA_D1_DATABASE_ID = "faf1f8b5-e029-4598-9fb0-c3cb1106d311"
 TRANSACTRA_PLANNER_MODE = "d1-native"
 TRANSACTRA_AGENT_EXECUTION_ENABLED = "true"
