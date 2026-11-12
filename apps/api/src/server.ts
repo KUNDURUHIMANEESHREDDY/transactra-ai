@@ -21,7 +21,7 @@ import { handleObservabilityRoute } from "./observability.js";
 import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, FINANCIAL_POLICY_VERSION, resolveUserFinancialLimits, verifyPayPalOrder, verifyPayPalCapturedOrder, verifyFinancialAuditChain } from "./financial-policy.js";
 const port=Number(process.env.PORT||8787),host=process.env.HOST||"127.0.0.1";
 const clientId=process.env.PAYPAL_CLIENT_ID||"",secret=process.env.PAYPAL_CLIENT_SECRET||"";
-const paypalSdkClient = new PayPalClient({ environment: process.env.PAYPAL_ENV === "live" ? PayPalEnvironment.Production : PayPalEnvironment.Sandbox, clientCredentialsAuthCredentials: { oAuthClientId: clientId, oAuthClientSecret: secret }, timeout: 20000 });
+const paypalSdkClient = new PayPalClient({ environment: process.env.NODE_ENV === "production" || process.env.PAYPAL_ENV === "live" ? PayPalEnvironment.Production : PayPalEnvironment.Sandbox, clientCredentialsAuthCredentials: { oAuthClientId: clientId, oAuthClientSecret: secret }, timeout: 20000 });
 const paypalOrders = new OrdersController(paypalSdkClient);
 const db=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL}):null;
 const currencies=new Set(["USD","EUR","GBP","INR","CAD","AUD","SGD","JPY"]);
@@ -335,7 +335,8 @@ async function route(req:IncomingMessage,res:ServerResponse){
     const launch = new URL("/api/auth/paypal/start", getPayPalConfig().redirectUri);
     launch.searchParams.set("state", state);
     launch.searchParams.set("session", browserSession);
-    return send(res, 200, { authorizeUrl: launch.toString(), provider: "PayPal", environment: process.env.PAYPAL_ENV || "sandbox" });
+    res.writeHead(302, { Location: launch.toString(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+    return res.end();
   }
 
   if (req.method === "GET" && url.pathname === "/api/auth/paypal/start") {
