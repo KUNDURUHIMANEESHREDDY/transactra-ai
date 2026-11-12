@@ -229,7 +229,7 @@ async function githubInstallationToken(env, requiredPermissions = {}) {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      repositories: ["transactra-ai"],
+      repositories: [repository.split("/")[1]],
       permissions: requestedPermissions,
     }),
     redirect: "error",
