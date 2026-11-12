@@ -96,7 +96,55 @@ async function handleTelegramUpdate(update,env){
  catch(e){console.error("cloudpilot_telegram_error",String(e?.message||e));await sendText(env,m,"CloudPilot is temporarily unavailable. Your request was not executed. Please try again shortly.");}
 }
 async function api(req,env,url){
+ const owner=String(env.TELEGRAM_OWNER_ID||"");
  if(req.method==="GET"&&url.pathname==="/api/config")return json({telegramBotUsername:String(env.TELEGRAM_BOT_USERNAME||"").replace(/^@/,"")});
+ const modelApi=url.pathname==="/api/models"||url.pathname==="/api/model-routes";
+ if(modelApi){
+  if(!await session(req,env))return json({error:"An authenticated Telegram session is required."},401);
+  if(!env.DB)return json({error:"Transactra D1 database is not bound."},503);
+  try{
+   if(url.pathname==="/api/models"&&req.method==="GET"){
+    const q=await env.DB.prepare("SELECT id,name,provider,base_url,model_id,enabled,created_at,updated_at FROM model_providers WHERE owner_id=? ORDER BY created_at DESC").bind(owner).all();
+    return json({models:(q.results||[]).map(x=>({...x,enabled:Boolean(x.enabled),key_configured:true}))});
+   }
+   if(url.pathname==="/api/models"&&req.method==="POST"){
+    let b;try{b=await req.json();}catch{return json({error:"Invalid JSON body."},400);}
+    const name=String(b?.name||"").trim().slice(0,80),provider=String(b?.provider||"openai-compatible").trim().slice(0,50),base=String(b?.baseUrl||"").trim(),model=String(b?.modelId||"").trim().slice(0,160),key=String(b?.apiKey||"");
+    if(!name||!model||key.length<8||key.length>4096)return json({error:"Name, model ID and a valid API key are required."},400);
+    let endpoint;try{endpoint=new URL(base);if(endpoint.protocol!=="https:"||endpoint.username||endpoint.password)throw Error();}catch{return json({error:"Provider endpoint must be a valid HTTPS URL."},400);}
+    const secret=String(env.TRANSACTRA_AUTH_HEADER_SECRET||"");if(secret.length<32)return json({error:"Credential encryption is not configured."},503);
+    const raw=await crypto.subtle.digest("SHA-256",enc.encode("transactra-model-key-v1:"+secret));
+    const cryptoKey=await crypto.subtle.importKey("raw",raw,{name:"AES-GCM"},false,["encrypt"]);
+    const iv=crypto.getRandomValues(new Uint8Array(12)),cipher=await crypto.subtle.encrypt({name:"AES-GCM",iv},cryptoKey,enc.encode(key));
+    const encrypted= b64(new Uint8Array([...iv,...new Uint8Array(cipher)])),id=crypto.randomUUID(),now=new Date().toISOString();
+    await env.DB.prepare("INSERT INTO model_providers(id,owner_id,name,provider,base_url,model_id,encrypted_api_key,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?)").bind(id,owner,name,provider,endpoint.toString().replace(/\/$/,""),model,encrypted,now,now).run();
+    return json({model:{id,name,provider,base_url:endpoint.toString(),model_id:model,enabled:true,key_configured:true,created_at:now}},201);
+   }
+   if(url.pathname==="/api/models"&&req.method==="DELETE"){
+    const id=url.searchParams.get("id")||"";if(!id)return json({error:"Model ID is required."},400);
+    await env.DB.prepare("DELETE FROM model_providers WHERE id=? AND owner_id=?").bind(id,owner).run();
+    await env.DB.prepare("UPDATE task_model_routes SET model_provider_id=CASE WHEN model_provider_id=? THEN NULL ELSE model_provider_id END,fallback_provider_id=CASE WHEN fallback_provider_id=? THEN NULL ELSE fallback_provider_id END,updated_at=? WHERE owner_id=?").bind(id,id,new Date().toISOString(),owner).run();
+    return json({deleted:true});
+   }
+   if(url.pathname==="/api/model-routes"&&req.method==="GET"){
+    const q=await env.DB.prepare("SELECT task_type,model_provider_id,fallback_provider_id,updated_at FROM task_model_routes WHERE owner_id=? ORDER BY task_type").bind(owner).all();
+    return json({routes:q.results||[]});
+   }
+   if(url.pathname==="/api/model-routes"&&req.method==="PUT"){
+    let b;try{b=await req.json();}catch{return json({error:"Invalid JSON body."},400);}
+    const types=["general","research","coding","planning","analysis","financial","orchestration"];
+    if(!types.includes(b?.taskType))return json({error:"Unsupported task category."},400);
+    for(const id of [b?.modelId,b?.fallbackModelId].filter(Boolean)){
+     const found=await env.DB.prepare("SELECT id FROM model_providers WHERE id=? AND owner_id=? AND enabled=1").bind(String(id),owner).first();
+     if(!found)return json({error:"Selected model is unavailable or disabled."},400);
+    }
+    const now=new Date().toISOString();
+    await env.DB.prepare("INSERT INTO task_model_routes(owner_id,task_type,model_provider_id,fallback_provider_id,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(owner_id,task_type) DO UPDATE SET model_provider_id=excluded.model_provider_id,fallback_provider_id=excluded.fallback_provider_id,updated_at=excluded.updated_at").bind(owner,b.taskType,b.modelId||null,b.fallbackModelId||null,now).run();
+    return json({saved:true,taskType:b.taskType,modelId:b.modelId||null,fallbackModelId:b.fallbackModelId||null,updatedAt:now});
+   }
+   return json({error:"Method not allowed."},405);
+  }catch(e){console.error("model_registry_error",String(e?.message||e));return json({error:"Model configuration could not be saved."},500);}
+ }
  if(req.method==="POST"&&url.pathname==="/api/auth/telegram/session"){let body;try{body=await req.json();}catch{return json({error:"Invalid request body."},400);}const user=await verifyInitData(body?.initData,env);if(!user)return json({error:"Telegram identity could not be verified. Reopen the dashboard from Telegram."},401);try{return json({authenticated:true,user:{id:user}},200,{"set-cookie":await issueCookie(user,env)});}catch{return json({error:"Dashboard session signing is not configured."},503);}}
  if(req.method==="POST"&&url.pathname==="/api/auth/telegram/logout")return json({authenticated:false},200,{"set-cookie":clearCookie});
  if(req.method==="GET"&&url.pathname==="/api/auth/session"){const user=await session(req,env);return user?json({authenticated:true,user:{id:user}}):json({authenticated:false},401);}
@@ -104,7 +152,7 @@ async function api(req,env,url){
  if(req.method!=="GET")return json({error:"read_only"},405);
  if(!await session(req,env))return json({error:"An authenticated Telegram session is required."},401);
  if(!env.DB)return json({error:"Transactra D1 database is not bound."},503);
- const owner=String(env.TELEGRAM_OWNER_ID),n=limit(url);
+ const n=limit(url);
  try{
   if(url.pathname==="/api/observability/overview"){const [t,a]=await Promise.all([env.DB.prepare("SELECT COUNT(*) total,SUM(status='succeeded') completed,SUM(status='failed') failed,SUM(status='running') running FROM tasks WHERE owner_id=?").bind(owner).first(),env.DB.prepare("SELECT COUNT(*) total FROM task_approvals WHERE owner_id=? AND status='pending' AND expires_at>?").bind(owner,new Date().toISOString()).first()]);return json({transactions:0,completed:0,failed:0,volume:"0",activeAgents:0,runningTasks:Number(t?.running||0),failedTasks:Number(t?.failed||0),pendingApprovals:Number(a?.total||0),successRate:Number(t?.total||0)?Math.round(Number(t?.completed||0)/Number(t.total)*100):0,database:true,databaseProvider:"Cloudflare D1",transactionDataAvailable:false});}
   if(url.pathname==="/api/observability/transactions")return json({transactions:[],source:"Payment transaction records are not present in the connected D1 schema."});
