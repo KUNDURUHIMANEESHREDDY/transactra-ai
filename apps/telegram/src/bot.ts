@@ -179,7 +179,8 @@ async function main() {
   const webhook=await tg<{url?:string}>("getWebhookInfo");
   if (webhook.url) throw new Error("A Telegram webhook is already configured. Set TELEGRAM_CLEAR_WEBHOOK=true once to switch this bot to polling, then restart it.");
   await tg("setMyCommands",{commands:[
-    {command:"start",description:"Open your Transactra payment desk"},\n    {command:"ai",description:"Chat with CloudPilot AI"},
+    {command:"start",description:"Open your Transactra payment desk"},
+    {command:"ai",description:"Chat with CloudPilot AI"},
     {command:"history",description:"Show recent transactions"},
     {command:"summary",description:"Show captured payment totals"},
     {command:"cancel",description:"Discard pending payment drafts"},
