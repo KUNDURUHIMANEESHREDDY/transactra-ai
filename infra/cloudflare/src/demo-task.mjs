@@ -3,8 +3,8 @@ export const DEMO_TASK_PROMPT = "Research the latest developments in artificial 
 function normalizePrompt(value) {
   return String(value || "")
     .toLowerCase()
-    .replace(/[^\\p{L}\\p{N}\\s]/gu, " ")
-    .replace(/\\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
@@ -98,5 +98,5 @@ export async function runDemoTask(env, update, prompt) {
     "The website's Agent Logs now contain the scripted assignments, handoffs, and verification events.",
     "",
     "DEMO DISCLOSURE: agent actions and report content above are predefined demonstration output. No live research, model inference, or external action was performed."
-  ].join("\\n");
+  ].join("\n");
 }
