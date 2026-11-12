@@ -8,12 +8,12 @@ Telegram is the primary operating interface for Transactra. The React web app re
 2. Open [@userinfobot](https://t.me/userinfobot) and copy your numeric Telegram user ID.
 3. Copy `.env.example` to `.env`.
 4. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OWNER_ID`. Keep the bot token private.
-5. Configure PayPal Sandbox credentials and PostgreSQL as described in the main README.
+5. Configure PayPal Sandbox credentials, PostgreSQL, a random `TOKEN_ENCRYPTION_SECRET` (at least 32 bytes), and a random `BACKEND_SHARED_SECRET` as described in the main README.
 6. Start the API with `npm run dev:api`.
 7. In a second terminal, start the bot with `npm run start:telegram`.
 8. Open your bot in Telegram and send `/start`.
 
-The bot uses Telegram long polling. It accepts commands only from the configured owner ID in a private chat. No public webhook or Telegram hosting service is required for local development.
+The bot uses Telegram long polling. It accepts commands only from the configured owner ID in a private chat. Bot-to-API calls also require `BACKEND_SHARED_SECRET`; the OAuth connect/status/disconnect routes verify both this shared secret and the configured Telegram owner ID. No public webhook or Telegram hosting service is required for local development.
 
 If a webhook is already registered for this bot, the poller will stop rather than silently replace it. To deliberately switch this bot from webhook delivery to polling, set `TELEGRAM_CLEAR_WEBHOOK=true` for one startup, start the bot, then return it to `false`. Do not do this if another production service is intended to own the webhook.
 
@@ -24,7 +24,7 @@ If a webhook is already registered for this bot, the poller will stop rather tha
 - Approve or discard a payment draft using inline buttons.
 - Open the PayPal Sandbox approval page from the chat.
 - Return to Telegram and ask Transactra to capture the approved order.
-- Use `/history` for recent transactions.
+- Send `connect paypal` (or `/connect`) to receive a secure link to PayPal’s official authorization page. Sign in on PayPal with your email or mobile number; never send credentials or one-time codes in Telegram. On callback, the account is stored against the initiating Telegram user ID and the bot confirms the connection.\n- Use `/history` for recent transactions.
 - Use `/summary` for confirmed captured totals.
 - Use `/cancel` to clear unsubmitted drafts.
 - Use `/help` to see commands.
