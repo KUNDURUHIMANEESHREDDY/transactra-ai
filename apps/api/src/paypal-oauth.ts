@@ -40,7 +40,14 @@ function validateHttpUrl(value: string, label: string): string {
 export function getPayPalConfig(_requestHost?: string): PayPalConfig {
   const clientId = process.env.PAYPAL_CLIENT_ID || "";
   const clientSecret = process.env.PAYPAL_CLIENT_SECRET || "";
-  const isLive = process.env.PAYPAL_ENV === "live";
+  const configuredEnvironment = process.env.PAYPAL_ENV;
+  if (process.env.NODE_ENV === "production" && configuredEnvironment !== "live") {
+    throw new Error("Production PayPal account connections require PAYPAL_ENV=live. Sandbox is permitted only outside production.");
+  }
+  if (configuredEnvironment && configuredEnvironment !== "live" && configuredEnvironment !== "sandbox") {
+    throw new Error("PAYPAL_ENV must be either live or sandbox.");
+  }
+  const isLive = configuredEnvironment === "live";
   const authBase = isLive ? "https://www.paypal.com" : "https://www.sandbox.paypal.com";
   const restBase = isLive ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
   const apiBase = validateHttpUrl(process.env.API_BASE_URL || "http://127.0.0.1:8787", "API_BASE_URL");
