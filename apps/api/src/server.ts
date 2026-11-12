@@ -52,6 +52,21 @@ async function ensureWorkflowSchema(){
  await db!.query("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS workflow_step_id UUID REFERENCES payment_workflow_steps(id)");
 }
 function requireOwner(req:IncomingMessage){const expected=String(process.env.TELEGRAM_OWNER_ID||"");const supplied=String(req.headers["x-transactra-owner-id"]||"");return Boolean(expected&&supplied&&expected===supplied);}
+function requireBotOwner(req:IncomingMessage){
+ const expected=process.env.BACKEND_SHARED_SECRET||"",supplied=String(req.headers["x-transactra-edge-secret"]||"");
+ const owner=String(process.env.TELEGRAM_OWNER_ID||""),user=String(req.headers["x-transactra-owner-id"]||"");
+ const a=Buffer.from(expected),b=Buffer.from(supplied);
+ return Boolean(owner&&/^\\d{1,20}$/.test(owner)&&user===owner&&expected&&supplied&&a.length===b.length&&timingSafeEqual(a,b));
+}
+function telegramUserId(req:IncomingMessage){return String(req.headers["x-transactra-owner-id"]||"");}
+async function notifyTelegramUser(userId:string,message:string){
+ const botToken=process.env.TELEGRAM_BOT_TOKEN;
+ if(!botToken||!/^\\d{1,20}$/.test(userId))return;
+ try{
+  const response=await fetch("https://api.telegram.org/bot"+botToken+"/sendMessage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:userId,text:message}),signal:AbortSignal.timeout(10000)});
+  if(!response.ok)console.error("Telegram OAuth notification failed:",response.status);
+ }catch(error){console.error("Telegram OAuth notification failed:",error instanceof Error?error.message:"unknown error");}
+}
 function splitPaymentInstructions(text:string){return text.split(/\s*(?:;|\n+|\bthen\b)\s*/i).map(x=>x.trim()).filter(Boolean);}
 async function createWorkflowOrder(workflowId:string){
  const q=await db!.query("SELECT id,sequence_no,recipient,purpose,amount::text,currency FROM payment_workflow_steps WHERE workflow_id=$1 AND status='READY' ORDER BY sequence_no LIMIT 1",[workflowId]);
@@ -96,85 +111,63 @@ async function route(req:IncomingMessage,res:ServerResponse){
   }
   if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.PAYPAL_ENV||"sandbox"});
 
-  // --- PayPal OAuth 2.0 Account Connection ---
+  // --- Telegram-bound PayPal OAuth 2.0 Account Connection ---
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/connect"){
+   if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram owner session required."});
    if(!db)return send(res,503,{error:"Database is required for persistent OAuth connection."});
+   if(!process.env.TOKEN_ENCRYPTION_SECRET||Buffer.byteLength(process.env.TOKEN_ENCRYPTION_SECRET,"utf8")<32)return send(res,503,{error:"TOKEN_ENCRYPTION_SECRET must be configured with at least 32 bytes."});
    await ensurePayPalConnectionSchema(db);
-   const redirectUrl=url.searchParams.get("redirect_url")||undefined;
-   const {state,authorizeUrl}=await createOAuthState(db,"default_user",redirectUrl,req.headers.host);
-   const wantsJson=url.searchParams.get("format")==="json"||req.headers.accept?.includes("application/json");
-   if(wantsJson)return send(res,200,{state,authorizeUrl});
-   res.writeHead(302,{Location:authorizeUrl,"Cache-Control":"no-store"});
-   return res.end();
+   const {authorizeUrl}=await createOAuthState(db,telegramUserId(req),req.headers.host);
+   return send(res,200,{authorizeUrl,provider:"PayPal",environment:process.env.PAYPAL_ENV||"sandbox"});
   }
 
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/callback"){
    if(!db)return send(res,503,{error:"Database is required for OAuth callback."});
    await ensurePayPalConnectionSchema(db);
    const config=getPayPalConfig(req.headers.host);
-   const code=url.searchParams.get("code");
-   const state=url.searchParams.get("state");
-   const err=url.searchParams.get("error");
-   const errDesc=url.searchParams.get("error_description");
-
-   if(err){
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=${encodeURIComponent(errDesc||err)}`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
-     return res.end();
+   const code=url.searchParams.get("code"),state=url.searchParams.get("state");
+   const err=url.searchParams.get("error"),errDesc=url.searchParams.get("error_description");
+   if(!state||state.length>256){
+    res.writeHead(302,{Location:config.frontendUrl+"/?paypal_connection=error&reason=missing_or_invalid_state","Cache-Control":"no-store","Referrer-Policy":"no-referrer"});return res.end();
    }
-
-   if(!code||!state){
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=missing_code_or_state`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
-     return res.end();
-   }
-
    const validation=await validateAndConsumeState(db,state);
-   if(!validation.valid){
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=${encodeURIComponent(validation.error||"invalid_state")}`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
-     return res.end();
+   if(!validation.valid||!validation.userId){
+    res.writeHead(302,{Location:config.frontendUrl+"/?paypal_connection=error&reason=invalid_state","Cache-Control":"no-store","Referrer-Policy":"no-referrer"});return res.end();
    }
-
+   const userId=validation.userId;
+   if(err||!code){
+    await notifyTelegramUser(userId,"PayPal connection was not completed. No account was linked. Send “connect paypal” whenever you are ready to try again.");
+    res.writeHead(302,{Location:config.frontendUrl+"/?paypal_connection=cancelled","Cache-Control":"no-store","Referrer-Policy":"no-referrer"});return res.end();
+   }
    try{
-     const tokenRes=await exchangeAuthorizationCode(code,req.headers.host);
-     const userInfo=await fetchPayPalUserInfo(tokenRes.access_token,req.headers.host);
-     await saveConnectedAccount(db,validation.userId||"default_user",{
-       payerId:userInfo.payerId,
-       email:userInfo.email,
-       name:userInfo.name,
-       verifiedAccount:userInfo.verifiedAccount,
-       accessToken:tokenRes.access_token,
-       refreshToken:tokenRes.refresh_token,
-       expiresIn:tokenRes.expires_in,
-       scope:tokenRes.scope
-     });
-
-     const targetBase=validation.redirectUrl||config.frontendUrl;
-     const delimiter=targetBase.includes("?")?"&":"?";
-     const target=`${targetBase}${delimiter}paypal_connection=success`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
-     return res.end();
+    const tokenRes=await exchangeAuthorizationCode(code,req.headers.host);
+    const userInfo=await fetchPayPalUserInfo(tokenRes.access_token,req.headers.host);
+    await saveConnectedAccount(db,userId,{
+     payerId:userInfo.payerId,email:userInfo.email,name:userInfo.name,verifiedAccount:userInfo.verifiedAccount,
+     accessToken:tokenRes.access_token,refreshToken:tokenRes.refresh_token,expiresIn:tokenRes.expires_in,scope:tokenRes.scope
+    });
+    await notifyTelegramUser(userId,"✅ PayPal connected successfully.\n\nAccount: "+(userInfo.email||userInfo.name||"PayPal account")+
+      "\nEnvironment: "+(process.env.PAYPAL_ENV||"sandbox")+"\n\nYour connection is stored against your Telegram account.");
+    res.writeHead(302,{Location:config.frontendUrl+"/?paypal_connection=success","Cache-Control":"no-store","Referrer-Policy":"no-referrer"});return res.end();
    }catch(e){
-     console.error("PayPal OAuth callback error:",e);
-     const msg=e instanceof Error?e.message:"OAuth exchange failed";
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=${encodeURIComponent(msg)}`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
-     return res.end();
+    console.error("PayPal OAuth callback error:",e instanceof Error?e.message:"unknown error");
+    await notifyTelegramUser(userId,"PayPal could not be connected. Please try again later. No successful connection was recorded.");
+    res.writeHead(302,{Location:config.frontendUrl+"/?paypal_connection=error","Cache-Control":"no-store","Referrer-Policy":"no-referrer"});return res.end();
    }
   }
 
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/status"){
+   if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram owner session required."});
    if(!db)return send(res,200,{connected:false,account:null,dbConnected:false});
    await ensurePayPalConnectionSchema(db);
-   const status=await getConnectedAccountStatus(db,"default_user");
-   return send(res,200,status);
+   return send(res,200,await getConnectedAccountStatus(db,telegramUserId(req)));
   }
 
   if(req.method==="POST"&&url.pathname==="/api/auth/paypal/disconnect"){
+   if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram owner session required."});
    if(!db)return send(res,503,{error:"Database is required to disconnect account."});
    await ensurePayPalConnectionSchema(db);
-   const disconnected=await disconnectPayPalAccount(db,"default_user");
+   const disconnected=await disconnectPayPalAccount(db,telegramUserId(req));
    return send(res,200,{success:disconnected,message:disconnected?"PayPal account disconnected.":"No active PayPal connection found."});
   }
   if(req.method==="POST"&&url.pathname==="/api/parse"){const b=await read(req);return send(res,200,{intent:await parse(String(b.text||""))});}
