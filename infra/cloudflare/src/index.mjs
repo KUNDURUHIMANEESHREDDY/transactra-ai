@@ -490,31 +490,19 @@ export async function makeReply(update,env){
   return "Transactra status\n\nWebhook: "+webhookState+"\nD1 event store: connected\nTelegram updates stored: "+(events?.total??0)+"\nLatest update: "+(events?.latest??"none")+(heartbeat?.scheduled_at?"\nScheduler heartbeat: "+heartbeat.scheduled_at:"\nScheduler heartbeat: not recorded") +"\n\nTask planner: "+plannerLabel+"\nNVIDIA planning: "+(nimPlanningReady?"configured; live inference not yet proven":"locked by configuration or entitlement") +"\nAgent execution: "+(executionReady?"enabled by configuration; acceptance still required":"LOCKED")+"\nExecution remains subject to owner approval and separate sensitive-operation approval.";
  }
  if(command.startsWith("/nvidia")||command==="/provider"){ const enabled=await getNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID); return "NVIDIA NIM command router reached Cloudflare production, but no matching action was selected. Use /nvidia status, /nvidia on, /nvidia off, or /provider. Runtime is "+(enabled?"ON":"OFF")+"."; } if(command.startsWith("/"))return "That command is not connected to the Cloudflare Telegram runtime yet. Use /help for the commands currently available.";
- const liveCheck=/^TRANSACTRA_NIM_LIVE_CHECK_([A-Z0-9_]{8,64})$/.exec(text);
+ const liveCheck=/^TRANSACTRA_CLOUDPILOT_LIVE_CHECK_([A-Z0-9_]{8,64})$/.exec(text);
   if(liveCheck){
    const enabled=String(env.NVIDIA_NIM_EXECUTION_ENABLED||"").trim().toLowerCase()==="true";
-   if(!enabled||!isNvidiaNimDeveloperAccessConfirmed(env)||!(await getNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID)))return "NVIDIA NIM live check blocked by the service, entitlement, or execution gate. No inference was sent.";
-   const provider="nvidia-nim:"+String(env.NVIDIA_NIM_MODEL||"");
-   const day=new Date().toISOString().slice(0,10);
-   const quotaSql="SELECT requests_reserved,requests_used,tokens_reserved,tokens_used,cost_microunits FROM inference_quota_daily WHERE quota_date=? AND provider=?";
-   const before=await env.DB.prepare(quotaSql).bind(day,provider).first()||{};
+   if(!enabled||!isNvidiaNimDeveloperAccessConfirmed(env)||!cloudPilotConfig(env).ok||!(await getNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID)))return "CloudPilot live check blocked by the service, entitlement, endpoint, or execution gate. No inference was sent.";
    try{
-    const completion=await completeNvidiaNim(env,{input:"Reply with exactly NIM_OK.",systemPrompt:"Return exactly NIM_OK and no other text.",maxOutputTokens:128,estimatedCostInr:0});
-    const after=await env.DB.prepare(quotaSql).bind(day,provider).first()||{};
-    const settled=Number(after.requests_used||0)===Number(before.requests_used||0)+1
-      &&Number(after.requests_reserved||0)===Number(before.requests_reserved||0)
-      &&Number(after.tokens_used||0)>Number(before.tokens_used||0)
-      &&Number(after.cost_microunits||0)===0;
-    return "NVIDIA NIM LIVE CHECK "+liveCheck[1]+"\nResult: "+completion.output.trim()
+    const completion=await completeCloudPilot(env,{input:"Reply with exactly CLOUDPILOT_OK.",systemPrompt:"Return exactly CLOUDPILOT_OK and no other text.",maxOutputTokens:64,estimatedCostInr:0});
+    return "CLOUDPILOT LIVE CHECK "+liveCheck[1]+"\nResult: "+completion.output.trim()
       +"\nProvider: "+completion.provider+"\nReturned model: "+completion.model
       +"\nLatency: "+completion.latencyMs+" ms"
       +"\nUsage: "+completion.usage.inputTokens+" input / "+completion.usage.outputTokens+" output tokens"
-      +"\nD1 quota settlement: "+(settled?"CONFIRMED":"NOT CONFIRMED")
-      +"\nRequests reserved/used: "+Number(after.requests_reserved||0)+"/"+Number(after.requests_used||0)
-      +"\nTokens reserved/used: "+Number(after.tokens_reserved||0)+"/"+Number(after.tokens_used||0)
-      +"\nRecorded cost: INR "+(Number(after.cost_microunits||0)/1000000);
+      +"\nQuota settlement: handled by CloudPilot; Transactra payment approval remains separate.";
    }catch(error){
-    return "NVIDIA NIM live check failed. No provider fallback or replay was attempted. "+String(error instanceof Error?error.message:"provider error").slice(0,180);
+    return "CloudPilot live check failed. No alternate provider or replay was attempted. "+String(error instanceof Error?error.message:"provider error").slice(0,180);
    }
   }
   const chatEnabled=String(env.NVIDIA_NIM_EXECUTION_ENABLED||"").trim().toLowerCase()==="true";

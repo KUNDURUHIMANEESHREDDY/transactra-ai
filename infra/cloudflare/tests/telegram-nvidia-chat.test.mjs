@@ -12,6 +12,14 @@ function streamedNimResponse(content, promptTokens = 12, completionTokens = 5) {
   return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
+function cloudPilotResponse(content, promptTokens = 12, completionTokens = 5) {
+  return new Response(JSON.stringify({
+    model: "stepfun-ai/step-5-preview",
+    choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens }
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
 function fakeDb() {
   const quota = { requests_reserved: 0, requests_used: 0, tokens_reserved: 0, tokens_used: 0, cost_microunits: 0 };
   return {
@@ -57,14 +65,14 @@ test("ordinary Telegram messages fail closed until zero-cost NVIDIA entitlement 
   assert.match(reply, /No model request was sent/);
 });
 
-test("ordinary owner messages are sent to NVIDIA NIM when every safety gate passes", async () => {
+test("ordinary owner messages are sent through authenticated CloudPilot inference when every safety gate passes", async () => {
   const originalFetch = globalThis.fetch;
   let requestBody;
   let requestUrl;
   globalThis.fetch = async (url, options) => {
     requestUrl = String(url);
     requestBody = JSON.parse(options.body);
-    return streamedNimResponse("Hello from NVIDIA NIM", 12, 5);
+    return cloudPilotResponse("Hello from CloudPilot", 12, 5);
   };
   try {
     const reply = await makeReply({
@@ -77,11 +85,13 @@ test("ordinary owner messages are sent to NVIDIA NIM when every safety gate pass
       NVIDIA_NIM_ZERO_COST_LIMIT_INR: "0",
       NVIDIA_NIM_API_KEY: "test-key",
       NVIDIA_NIM_MODEL: "stepfun-ai/step-5-preview",
+      CLOUDPILOT_INFERENCE_URL: "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions",
+      CLOUDPILOT_INFERENCE_SECRET: "test-shared-secret-that-is-at-least-32-bytes",
       DB: fakeDb()
     });
 
-    assert.equal(reply, "Hello from NVIDIA NIM");
-    assert.match(requestUrl, /\/v1\/chat\/completions$/);
+    assert.equal(reply, "Hello from CloudPilot");
+    assert.equal(requestUrl, "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions");
     assert.match(requestBody.messages.at(-1).content, /What can you do\?/);
     assert.equal(requestBody.model, "stepfun-ai/step-5-preview");
     assert.equal(requestBody.max_tokens, 256);
@@ -90,17 +100,17 @@ test("ordinary owner messages are sent to NVIDIA NIM when every safety gate pass
   }
 });
 
-test("unique NVIDIA live-check command confirms returned model, latency, and D1 settlement", async () => {
+test("unique CloudPilot live-check command confirms returned model, latency, and usage", async () => {
   const originalFetch = globalThis.fetch;
   let requestBody;
   globalThis.fetch = async (_url, options) => {
     requestBody = JSON.parse(options.body);
-    return streamedNimResponse("NIM_OK", 9, 2);
+    return cloudPilotResponse("CLOUDPILOT_OK", 9, 2);
   };
   try {
     const reply = await makeReply({
       update_id: 104,
-      message: { text: "TRANSACTRA_NIM_LIVE_CHECK_20261110_TEST1234", from: { id: 12345 }, chat: { id: 12345, type: "private" } }
+      message: { text: "TRANSACTRA_CLOUDPILOT_LIVE_CHECK_20261110_TEST1234", from: { id: 12345 }, chat: { id: 12345, type: "private" } }
     }, {
       TELEGRAM_OWNER_ID: "12345",
       NVIDIA_NIM_EXECUTION_ENABLED: "true",
@@ -109,19 +119,21 @@ test("unique NVIDIA live-check command confirms returned model, latency, and D1 
       NVIDIA_NIM_API_KEY: "test-key",
       NVIDIA_NIM_MODEL: "stepfun-ai/step-5-preview",
       NVIDIA_NIM_FALLBACK_MODELS: "",
+      CLOUDPILOT_INFERENCE_URL: "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions",
+      CLOUDPILOT_INFERENCE_SECRET: "test-shared-secret-that-is-at-least-32-bytes",
       DB: fakeDb()
     });
-    assert.match(reply, /Result: NIM_OK/);
+    assert.match(reply, /Result: CLOUDPILOT_OK/);
     assert.match(reply, /Returned model: stepfun-ai\/step-5-preview/);
     assert.match(reply, /Latency: \d+ ms/);
-    assert.match(reply, /D1 quota settlement: CONFIRMED/);
-    assert.equal(requestBody.max_tokens, 128);
+    assert.match(reply, /Quota settlement: handled by CloudPilot/);
+    assert.equal(requestBody.max_tokens, 64);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("owner-only NVIDIA command toggles runtime control without sending inference", async () => {
+test("owner-only model command toggles runtime control without sending inference", async () => {
   let enabled = 0;
   const db = {
     prepare(sql) {
@@ -150,6 +162,8 @@ test("owner-only NVIDIA command toggles runtime control without sending inferenc
     NVIDIA_NIM_ZERO_COST_LIMIT_INR: "0",
     NVIDIA_NIM_API_KEY: "test-key",
     NVIDIA_NIM_MODEL: "stepfun-ai/step-5-preview",
+    CLOUDPILOT_INFERENCE_URL: "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions",
+    CLOUDPILOT_INFERENCE_SECRET: "test-shared-secret-that-is-at-least-32-bytes",
     DB: db
   };
   try {
@@ -193,7 +207,7 @@ test("saved owner memory is injected into chat prompt context", async () => {
   let requestBody;
   globalThis.fetch = async (_url, options) => {
     requestBody = JSON.parse(options.body);
-    return streamedNimResponse("I recall your project memory", 15, 6);
+    return cloudPilotResponse("I recall your project memory", 15, 6);
   };
   const db = fakeDb();
   const originalPrepare = db.prepare;
@@ -223,6 +237,8 @@ test("saved owner memory is injected into chat prompt context", async () => {
       NVIDIA_NIM_ZERO_COST_LIMIT_INR: "0",
       NVIDIA_NIM_API_KEY: "test-key",
       NVIDIA_NIM_MODEL: "stepfun-ai/step-5-preview",
+      CLOUDPILOT_INFERENCE_URL: "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions",
+      CLOUDPILOT_INFERENCE_SECRET: "test-shared-secret-that-is-at-least-32-bytes",
       DB: db
     });
     assert.equal(reply, "I recall your project memory");
