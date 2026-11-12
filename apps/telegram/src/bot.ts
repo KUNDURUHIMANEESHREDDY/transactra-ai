@@ -51,12 +51,12 @@ async function handleMessage(message:any) {
   if (text.toLowerCase()==="connect paypal" || text==="/connect" || text==="/paypal") {
     try {
       const result=await api<{authorizeUrl:string;environment:string}>("/api/auth/paypal/connect");
-      await say(chatId,"CONNECT PAYPAL · "+result.environment.toUpperCase()+"\\n\\nOpen PayPal’s official authorization page, sign in with your PayPal email or mobile number, and approve the requested access. Transactra never asks for your PayPal password or one-time code in Telegram.",keyboard([[{text:"Authorize PayPal",url:result.authorizeUrl}]]));
+      await say(chatId,"CONNECT PAYPAL · "+result.environment.toUpperCase()+"\n\nOpen PayPal’s official authorization page, sign in with your PayPal email or mobile number, and approve the requested access. Transactra never asks for your PayPal password or one-time code in Telegram.",keyboard([[{text:"Authorize PayPal",url:result.authorizeUrl}]]));
     } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not start PayPal authorization. Check the server configuration."); }
     return;
   }
   if (text==="/help") {
-    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2–8 step plan separated by semicolons, new lines, or “then”. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/connect - securely connect your PayPal account\\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
+    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2–8 step plan separated by semicolons, new lines, or “then”. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/connect - securely connect your PayPal account\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
     return;
   }
   if (text==="/cancel") {
