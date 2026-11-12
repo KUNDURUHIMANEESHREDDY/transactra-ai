@@ -7,7 +7,7 @@ workers_dev = true
 [[d1_databases]]
 binding = "DB"
 database_name = "transactra"
-database_id = "35047d34-b8f4-4a2a-9321-fb5b5e48e409"
+database_id = "faf1f8b5-e029-4598-9fb0-c3cb1106d311"
 migrations_dir = "migrations"
 
 [[queues.producers]]
@@ -30,7 +30,7 @@ MEM0_MONTHLY_ADDITION_LIMIT = "10000"
 MEM0_MONTHLY_RETRIEVAL_LIMIT = "1000"
 MEM0_COMPACTION_THRESHOLD_PERCENT = "70"
 TRANSACTRA_ENV = "production"
-TRANSACTRA_D1_DATABASE_ID = "35047d34-b8f4-4a2a-9321-fb5b5e48e409"
+TRANSACTRA_D1_DATABASE_ID = "faf1f8b5-e029-4598-9fb0-c3cb1106d311"
 TRANSACTRA_PLANNER_MODE = "d1-native"
 TRANSACTRA_AGENT_EXECUTION_ENABLED = "true"
 TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED = "true"
