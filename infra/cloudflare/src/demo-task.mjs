@@ -49,7 +49,7 @@ export async function runDemoTask(env, update, prompt) {
   }
   const updateId = String(update?.update_id ?? "");
   const ownerId = String(env.TELEGRAM_OWNER_ID || "");
-  if (!/^\\d{1,20}$/.test(updateId) || !/^\\d{1,20}$/.test(ownerId)) {
+  if (!/^\d{1,20}$/.test(updateId) || !/^\d{1,20}$/.test(ownerId)) {
     throw new Error("demo_task_identity_invalid");
   }
   const taskId = "demo-tg-" + updateId;
