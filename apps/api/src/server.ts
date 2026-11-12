@@ -90,8 +90,8 @@ async function ensureDb(){
  await db.query("CREATE INDEX IF NOT EXISTS payment_approval_challenges_user_expiry_idx ON payment_approval_challenges(user_id,expires_at) WHERE status='PENDING'");
  await db.query("CREATE TABLE IF NOT EXISTS financial_policy_audit(id BIGSERIAL PRIMARY KEY,user_id TEXT NOT NULL,event_type TEXT NOT NULL,allowed BOOLEAN NOT NULL,reason TEXT NOT NULL,policy_version TEXT NOT NULL,risk_level TEXT NOT NULL,payload_hash CHAR(64),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
  await db.query("CREATE INDEX IF NOT EXISTS financial_policy_audit_user_created_idx ON financial_policy_audit(user_id,created_at DESC)");
- const migration=await db.query("SELECT 1 FROM schema_migrations WHERE version='0008_financial_policy_hardening'");
- if(!migration.rowCount)throw Error("Financial policy migration 0008 is required before any payment operation.");
+ const migrations=await db.query("SELECT version FROM schema_migrations WHERE version IN ('0008_financial_policy_hardening','0009_capture_recovery_leases')");
+ if(migrations.rowCount!==2)throw Error("Financial policy migrations 0008 and 0009 are required before any payment operation.");
 }
 function assertPayPalSdkConfigured(){if(!clientId||!secret)throw Error("PayPal API credentials are not configured on the server.");}
 async function createPayPalOrder(transactionId:string,p:{amount:string;currency:string;purpose:string}){assertPayPalSdkConfigured();const response=await paypalOrders.createOrder({body:{intent:CheckoutPaymentIntent.Capture,purchaseUnits:[{referenceId:transactionId,description:p.purpose.slice(0,127),amount:{currencyCode:p.currency.trim(),value:p.amount}}],applicationContext:{brandName:"Transactra",userAction:OrderApplicationContextUserAction.PayNow,shippingPreference:OrderApplicationContextShippingPreference.NoShipping}},paypalRequestId:transactionId,prefer:"return=representation"});return response.result;}
