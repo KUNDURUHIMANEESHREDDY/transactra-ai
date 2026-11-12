@@ -34,9 +34,12 @@ function rules(text:string):Intent{
 }
 async function parse(text:string):Promise<Intent>{
  if(!text.trim()||text.length>1000)throw Error("Enter a payment request under 1,000 characters.");
- const base=process.env.AI_BASE_URL,key=process.env.AI_API_KEY,model=process.env.AI_MODEL;
+ const cloudPilotUrl=process.env.CLOUDPILOT_INFERENCE_URL;
+ const cloudPilotSecret=process.env.CLOUDPILOT_INFERENCE_SECRET;
+ const base=cloudPilotUrl||process.env.AI_BASE_URL,key=cloudPilotUrl?cloudPilotSecret:process.env.AI_API_KEY,model=process.env.AI_MODEL;
  if(base&&key&&model)try{
-  const r=await fetch(base.replace(/\/$/,"")+"/chat/completions",{method:"POST",headers:{Authorization:"Bearer "+key,"Content-Type":"application/json"},body:JSON.stringify({model,temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Extract payment amount, currency, recipient and purpose as JSON. Never infer missing amount or recipient."},{role:"user",content:text}]}),signal:AbortSignal.timeout(12000)});
+  const endpoint=base.replace(/\/$/,"")+(base.endsWith("/chat/completions")?"":"/chat/completions");
+  const r=await fetch(endpoint,{method:"POST",headers:{Authorization:"Bearer "+key,"Content-Type":"application/json"},body:JSON.stringify({model,temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Extract payment amount, currency, recipient and purpose as JSON. Never infer missing amount or recipient. Return only valid JSON."},{role:"user",content:text}]}),signal:AbortSignal.timeout(12000)});
   if(r.ok){const data=await r.json() as {choices?:Array<{message?:{content?:string}}>};const p=JSON.parse(data.choices?.[0]?.message?.content||"{}") as Record<string,unknown>;const amount=Number(p.amount),currency=String(p.currency||"USD").toUpperCase(),recipient=String(p.recipient||"").trim();if(Number.isFinite(amount)&&amount>0&&amount<=1000000&&currencies.has(currency)&&recipient)return {amount:amount.toFixed(2),currency,recipient:recipient.slice(0,80),purpose:String(p.purpose||"Payment").slice(0,120),confidence:.97,source:"model"};}
  }catch{/* no-key deterministic fallback */}
  return rules(text);
