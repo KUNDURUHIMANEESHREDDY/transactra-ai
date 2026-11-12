@@ -22,7 +22,7 @@ async function tg<T=unknown>(method:string, body:Record<string,unknown> = {}):Pr
 async function api<T=Record<string,unknown>>(path:string, method="GET", body?:unknown):Promise<T> {
   const response = await fetch(apiBase + path, {
     method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId,"x-transactra-edge-secret":backendSharedSecret},
-    ...(body===undefined?{}:{body:JSON.stringify(body)}), signal:AbortSignal.timeout(20000)
+    ...(body===undefined?{}:{body:JSON.stringify(body)}), signal:AbortSignal.timeout(130000)
   });
   const data = await response.json() as T & {error?:string};
   if (!response.ok) throw new Error(data.error || "Transactra API request failed");
