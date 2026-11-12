@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash } from "../dist/apps/api/src/financial-policy.js";
 
 const candidate = { userId: "telegram:123", amount: "25.00", currency: "USD", recipient: "Alex", purpose: "Dinner" };
-const limits = { maxTransactionAmount: 1000, maxDailyAmount: 2500, maxDailyTransactions: 10 };
+const limits = { maxTransactionAmount: 1000, maxDailyAmount: 2500, maxDailyTransactions: 10, highValueThreshold: 500 };
 test("allows an in-policy payment but always requires explicit approval", () => {
   const result = evaluatePaymentPolicy(candidate, { dailySpent: 0, dailyCount: 0 }, limits);
   assert.equal(result.allowed, true);
@@ -68,4 +68,22 @@ test("rejects invalid runtime financial limits instead of silently accepting the
     if (original === undefined) delete process.env.FINANCIAL_MAX_DAILY_TRANSACTIONS;
     else process.env.FINANCIAL_MAX_DAILY_TRANSACTIONS = original;
   }
+});
+
+
+test("requires step-up confirmation for high-value payments", () => {
+  const highValueLimits = { ...limits, highValueThreshold: 500 };
+  const result = evaluatePaymentPolicy({ ...candidate, amount: "600" }, { dailySpent: 0, dailyCount: 0 }, highValueLimits);
+  assert.equal(result.allowed, true);
+  assert.equal(result.requiresStepUp, true);
+  assert.equal(result.approvalRequired, true);
+});
+
+test("blocks exact duplicate transactions and elevated suspicious activity", () => {
+  const duplicate = evaluatePaymentPolicy(candidate, { dailySpent: 0, dailyCount: 1, duplicateCount: 1 }, limits);
+  assert.equal(duplicate.allowed, false);
+  assert.match(duplicate.reason, /duplicate/i);
+  const suspicious = evaluatePaymentPolicy(candidate, { dailySpent: 0, dailyCount: 0, recentAttempts: 5, failedAttempts: 2, newRecipient: true }, limits);
+  assert.equal(suspicious.risk, "high");
+  assert.ok(suspicious.riskScore >= 60);
 });

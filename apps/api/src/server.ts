@@ -1,5 +1,5 @@
 import {createServer,type IncomingMessage,type ServerResponse} from "node:http";
-import {randomUUID,timingSafeEqual} from "node:crypto";
+import {randomUUID,timingSafeEqual,createHash} from "node:crypto";
 import {processTelegramUpdate} from "../../telegram/src/bot.js";
 import {Pool} from "pg";
 import {
@@ -15,12 +15,12 @@ import {
   createOAuthSessionToken,
   hashOAuthSession
 } from "./paypal-oauth.js";
-import { getAuthenticatedUser } from "./request-auth.js";
+import { getAuthenticatedUser, verifyTelegramWebAppInitData, createAuthenticatedSessionCookie, clearAuthenticatedSessionCookie } from "./request-auth.js";
 import { handleObservabilityRoute } from "./observability.js";
-import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash } from "./financial-policy.js";
+import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, FINANCIAL_POLICY_VERSION } from "./financial-policy.js";
 const port=Number(process.env.PORT||8787),host=process.env.HOST||"127.0.0.1";
 const clientId=process.env.PAYPAL_CLIENT_ID||"",secret=process.env.PAYPAL_CLIENT_SECRET||"";
-const paypalBase=process.env.PAYPAL_ENV==="live"?"https://api-m.paypal.com":"https://api-m.sandbox.paypal.com";
+const paypalBase=String(process.env.PAYPAL_ENV||"sandbox").toLowerCase()==="live"?"https://api-m.paypal.com":"https://api-m.sandbox.paypal.com";
 const db=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL}):null;
 const currencies=new Set(["USD","EUR","GBP","INR","CAD","AUD","SGD","JPY"]);
 const processedTelegramUpdates=new Set<number>();
@@ -88,9 +88,11 @@ async function ensureDb(){
  await db.query("CREATE INDEX IF NOT EXISTS payment_approval_challenges_user_expiry_idx ON payment_approval_challenges(user_id,expires_at) WHERE status='PENDING'");
  await db.query("CREATE TABLE IF NOT EXISTS financial_policy_audit(id BIGSERIAL PRIMARY KEY,user_id TEXT NOT NULL,event_type TEXT NOT NULL,allowed BOOLEAN NOT NULL,reason TEXT NOT NULL,policy_version TEXT NOT NULL,risk_level TEXT NOT NULL,payload_hash CHAR(64),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
  await db.query("CREATE INDEX IF NOT EXISTS financial_policy_audit_user_created_idx ON financial_policy_audit(user_id,created_at DESC)");
+ const migration=await db.query("SELECT 1 FROM schema_migrations WHERE version='0008_financial_policy_hardening'");
+ if(!migration.rowCount)throw Error("Financial policy migration 0008 is required before any payment operation.");
 }
-async function token(){if(!clientId||!secret)throw Error("PayPal Sandbox credentials are not configured on the server.");const auth=Buffer.from(clientId+":"+secret).toString("base64");const r=await fetch(paypalBase+"/v1/oauth2/token",{method:"POST",headers:{Authorization:"Basic "+auth,"Content-Type":"application/x-www-form-urlencoded"},body:"grant_type=client_credentials"});const d=await r.json() as {access_token?:string;error_description?:string};if(!r.ok||!d.access_token)throw Error(d.error_description||"PayPal authentication failed.");return d.access_token;}
-async function paypal(path:string,t:string,method:string,payload?:unknown,requestId?:string){const r=await fetch(paypalBase+path,{method,headers:{Authorization:"Bearer "+t,"Content-Type":"application/json",...(requestId?{"PayPal-Request-Id":requestId}:{})},...(payload?{body:JSON.stringify(payload)}:{})});const d=await r.json() as Record<string,unknown>;if(!r.ok)throw Error(String(d.message||d.name||"PayPal request failed"));return d;}
+async function token(){if(!clientId||!secret)throw Error("PayPal API credentials are not configured on the server.");const auth=Buffer.from(clientId+":"+secret).toString("base64");const r=await fetch(paypalBase+"/v1/oauth2/token",{method:"POST",headers:{Authorization:"Basic "+auth,"Content-Type":"application/x-www-form-urlencoded"},body:"grant_type=client_credentials",redirect:"error",signal:AbortSignal.timeout(15000)});const d=await r.json() as {access_token?:string;error_description?:string};if(!r.ok||!d.access_token)throw Error(d.error_description||"PayPal authentication failed.");return d.access_token;}
+async function paypal(path:string,t:string,method:string,payload?:unknown,requestId?:string){const r=await fetch(paypalBase+path,{method,headers:{Authorization:"Bearer "+t,"Content-Type":"application/json",...(requestId?{"PayPal-Request-Id":requestId}:{})},...(payload?{body:JSON.stringify(payload)}:{}),redirect:"error",signal:AbortSignal.timeout(20000)});const d=await r.json() as Record<string,unknown>;if(!r.ok)throw Error(String(d.message||d.name||"PayPal request failed"));return d;}
 async function ensureWorkflowSchema(){
  await ensureDb();
  await db!.query("CREATE TABLE IF NOT EXISTS payment_workflows(id UUID PRIMARY KEY,user_id TEXT NOT NULL,raw_prompt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('PENDING_APPROVAL','APPROVED','IN_PROGRESS','COMPLETED','REJECTED','FAILED')),step_count INTEGER NOT NULL CHECK(step_count BETWEEN 2 AND 8),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
@@ -106,76 +108,117 @@ function requireBotOwner(req:IncomingMessage){
  return Boolean(expected.length>=32&&owner&&/^\d{1,20}$/.test(owner)&&user===owner&&supplied&&a.length===b.length&&timingSafeEqual(a,b));
 }
 function telegramUserId(req:IncomingMessage){return "telegram:"+String(req.headers["x-transactra-owner-id"]||"");}
-async function paymentExposure(userId:string,currency:string){
- const q=await db!.query("SELECT COALESCE(SUM(amount),0)::text AS spent,COUNT(*)::int AS count FROM payment_transactions WHERE user_id=$1 AND currency=$2 AND created_at >= NOW()-INTERVAL '24 hours' AND status NOT IN ('FAILED','CANCELLED','DENIED')",[userId,currency]);
- return {dailySpent:Number(q.rows[0]?.spent||0),dailyCount:Number(q.rows[0]?.count||0)};
+async function loadUserFinancialLimits(client:any,userId:string){
+ const base=getFinancialPolicyLimits();
+ const q=await client.query("SELECT enabled,max_transaction_amount::text,max_daily_amount::text,max_daily_transactions,high_value_threshold::text FROM financial_user_policies WHERE user_id=$1",[userId]);
+ if(!q.rowCount)return base;
+ const row=q.rows[0];
+ if(!row.enabled)throw Error("Financial policy is disabled for this user; all payments are blocked.");
+ const limits={maxTransactionAmount:Number(row.max_transaction_amount),maxDailyAmount:Number(row.max_daily_amount),maxDailyTransactions:Number(row.max_daily_transactions),highValueThreshold:Number(row.high_value_threshold)};
+ if(!Number.isFinite(limits.maxTransactionAmount)||limits.maxTransactionAmount<=0||!Number.isFinite(limits.maxDailyAmount)||limits.maxDailyAmount<=0||!Number.isSafeInteger(limits.maxDailyTransactions)||limits.maxDailyTransactions<=0||!Number.isFinite(limits.highValueThreshold)||limits.highValueThreshold<=0)throw Error("Stored user financial policy is invalid; payments are blocked.");
+ return limits;
 }
-function policyError(decision:ReturnType<typeof evaluatePaymentPolicy>){return decision.reason;}
+async function paymentExposure(client:any,userId:string,currency:string,recipient:string,amount:string,purpose:string,excludeTransactionId?:string,payloadHash?:string,excludeApprovalId?:string){
+ const q=await client.query("SELECT COALESCE(SUM(amount) FILTER(WHERE created_at>=NOW()-INTERVAL '24 hours' AND status NOT IN ('FAILED','CANCELLED','DENIED')),0)::text AS spent,COUNT(*) FILTER(WHERE created_at>=NOW()-INTERVAL '24 hours' AND status NOT IN ('FAILED','CANCELLED','DENIED'))::int AS count,COUNT(*) FILTER(WHERE status='FAILED' AND created_at>NOW()-INTERVAL '1 hour')::int AS failed,COUNT(*) FILTER(WHERE amount=$4 AND recipient=$3 AND purpose=$5 AND created_at>NOW()-INTERVAL '10 minutes' AND status NOT IN ('FAILED','CANCELLED','DENIED'))::int AS duplicates,NOT EXISTS(SELECT 1 FROM payment_transactions x WHERE x.user_id=$1 AND x.currency=$2 AND x.recipient=$3 AND x.status='COMPLETED') AS new_recipient FROM payment_transactions WHERE user_id=$1 AND currency=$2 AND ($6::uuid IS NULL OR id<>$6::uuid)",[userId,currency,recipient,amount,purpose,excludeTransactionId||null]);
+ const attempts=await client.query("SELECT COUNT(*)::int AS recent FROM payment_approval_challenges WHERE user_id=$1 AND created_at>NOW()-INTERVAL '10 minutes'",[userId]);
+ const pendingDuplicates=payloadHash?await client.query("SELECT COUNT(*)::int AS count FROM payment_approval_challenges WHERE user_id=$1 AND payload_hash=$2 AND status='PENDING' AND expires_at>NOW() AND ($3::uuid IS NULL OR id<>$3::uuid)",[userId,payloadHash,excludeApprovalId||null]):{rows:[{count:0}]};
+ return {dailySpent:Number(q.rows[0]?.spent||0),dailyCount:Number(q.rows[0]?.count||0),failedAttempts:Number(q.rows[0]?.failed||0),duplicateCount:Number(q.rows[0]?.duplicates||0)+Number(pendingDuplicates.rows[0]?.count||0),newRecipient:Boolean(q.rows[0]?.new_recipient),recentAttempts:Number(attempts.rows[0]?.recent||0)};
+}
+async function appendFinancialAudit(client:any,event:{userId:string;eventType:string;allowed:boolean;reason:string;policyVersion:string;risk:string;riskScore:number;payloadHash?:string|null}){
+ await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext('financial-audit'))",[event.userId]);
+ const previous=await client.query("SELECT entry_hash FROM financial_policy_audit WHERE user_id=$1 ORDER BY id DESC LIMIT 1",[event.userId]);
+ const previousHash=String(previous.rows[0]?.entry_hash||"GENESIS"),createdAt=new Date().toISOString();
+ const canonical=JSON.stringify({userId:event.userId,eventType:event.eventType,allowed:event.allowed,reason:event.reason,policyVersion:event.policyVersion,risk:event.risk,riskScore:event.riskScore,payloadHash:event.payloadHash||null,previousHash,createdAt});
+ const entryHash=createHash("sha256").update(canonical).digest("hex");
+ await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level,risk_score,payload_hash,previous_hash,entry_hash,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",[event.userId,event.eventType,event.allowed,event.reason,event.policyVersion,event.risk,event.riskScore,event.payloadHash||null,previousHash,entryHash,createdAt]);
+}
 
-async function createPaymentApproval(userId:string,raw:string,intent:Intent){
+async function createPaymentApproval(userId:string,raw:string,intent:Intent,idempotencyKey?:string){
  assertPaymentEnvironment();
+ const account=await getConnectedAccountStatus(db!,userId);
+ if(!account.connected||!account.account?.verified)throw Error("Connect a verified PayPal account before preparing a payment.");
+ if(idempotencyKey&&!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey))throw Error("Invalid idempotency key.");
  const client=await db!.connect();
  try{
   await client.query("BEGIN");
   await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))",[userId,intent.currency]);
+  const candidate={userId,amount:intent.amount,currency:intent.currency,recipient:intent.recipient,purpose:intent.purpose};
+  const requestHash=paymentPayloadHash(candidate);
+  if(idempotencyKey){
+   const existing=await client.query("SELECT id,payload_hash,status,expires_at,risk_level,policy_version,requires_step_up FROM payment_approval_challenges WHERE user_id=$1 AND idempotency_key=$2 FOR UPDATE",[userId,idempotencyKey]);
+   if(existing.rowCount){
+    const prior=existing.rows[0];
+    if(prior.payload_hash!==requestHash)throw Error("Idempotency key was already used for a different payment request.");
+    if(prior.status!=="PENDING"||new Date(prior.expires_at).getTime()<=Date.now()){await client.query("COMMIT");return {ok:false as const,error:"This idempotent payment request has already been consumed or expired."};}
+    await client.query("COMMIT");
+    return {ok:true as const,approvalId:prior.id,intent,risk:prior.risk_level,policyVersion:prior.policy_version,requiresStepUp:Boolean(prior.requires_step_up),expiresInSeconds:Math.max(0,Math.floor((new Date(prior.expires_at).getTime()-Date.now())/1000))};
+   }
+  }
   const rate=await client.query("SELECT COUNT(*) FILTER (WHERE status='PENDING' AND expires_at>NOW())::int AS pending,COUNT(*) FILTER (WHERE created_at>NOW()-INTERVAL '10 minutes')::int AS recent FROM payment_approval_challenges WHERE user_id=$1",[userId]);
   if(Number(rate.rows[0]?.pending||0)>=5||Number(rate.rows[0]?.recent||0)>=10){
    const reason="Payment request rate limit reached; wait before creating another approval.";
-   await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level) VALUES($1,'PAYMENT_PREPARE',false,$2,$3,'high')",[userId,reason,"2026-11-12.1"]);
+   await appendFinancialAudit(client,{userId,eventType:"PAYMENT_PREPARE",allowed:false,reason,policyVersion:FINANCIAL_POLICY_VERSION,risk:"high",riskScore:100,payloadHash:requestHash});
    await client.query("COMMIT");return {ok:false as const,error:reason};
   }
-  const exposure=await client.query("SELECT COALESCE(SUM(amount),0)::text AS spent,COUNT(*)::int AS count FROM payment_transactions WHERE user_id=$1 AND currency=$2 AND created_at>=NOW()-INTERVAL '24 hours' AND status NOT IN ('FAILED','CANCELLED','DENIED')",[userId,intent.currency]);
-  const decision=evaluatePaymentPolicy({userId,amount:intent.amount,currency:intent.currency,recipient:intent.recipient,purpose:intent.purpose},{dailySpent:Number(exposure.rows[0]?.spent||0),dailyCount:Number(exposure.rows[0]?.count||0)});
+  const limits=await loadUserFinancialLimits(client,userId);
+  const exposure=await paymentExposure(client,userId,intent.currency,intent.recipient,intent.amount,intent.purpose,undefined,requestHash);
+  const decision=evaluatePaymentPolicy(candidate,exposure,limits);
   if(!decision.allowed){
-   await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level) VALUES($1,'PAYMENT_PREPARE',false,$2,$3,$4)",[userId,decision.reason,decision.policyVersion,decision.risk]);
+   await appendFinancialAudit(client,{userId,eventType:"PAYMENT_PREPARE",allowed:false,reason:decision.reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:requestHash});
    await client.query("COMMIT");return {ok:false as const,error:decision.reason};
   }
   const normalized=decision.normalized!,approvalId=randomUUID(),hash=paymentPayloadHash(normalized);
-  await client.query("INSERT INTO payment_approval_challenges(id,user_id,raw_prompt,recipient,purpose,amount,currency,payload_hash,policy_version,risk_level,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW()+INTERVAL '10 minutes')",[approvalId,userId,raw.slice(0,1000),normalized.recipient,normalized.purpose,normalized.amount,normalized.currency,hash,decision.policyVersion,decision.risk]);
-  await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level,payload_hash) VALUES($1,'PAYMENT_PREPARE',true,$2,$3,$4,$5)",[userId,decision.reason,decision.policyVersion,decision.risk,hash]);
+  await client.query("INSERT INTO payment_approval_challenges(id,user_id,raw_prompt,recipient,purpose,amount,currency,payload_hash,policy_version,risk_level,risk_score,requires_step_up,idempotency_key,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW()+INTERVAL '10 minutes')",[approvalId,userId,raw.slice(0,1000),normalized.recipient,normalized.purpose,normalized.amount,normalized.currency,hash,decision.policyVersion,decision.risk,decision.riskScore,decision.requiresStepUp,idempotencyKey||null]);
+  await appendFinancialAudit(client,{userId,eventType:"PAYMENT_PREPARE",allowed:true,reason:decision.reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
   await client.query("COMMIT");
-  return {ok:true as const,approvalId,intent:{...intent,amount:normalized.amount,currency:normalized.currency,recipient:normalized.recipient,purpose:normalized.purpose},risk:decision.risk,policyVersion:decision.policyVersion,expiresInSeconds:600};
+  return {ok:true as const,approvalId,intent:{...intent,amount:normalized.amount,currency:normalized.currency,recipient:normalized.recipient,purpose:normalized.purpose},risk:decision.risk,riskScore:decision.riskScore,requiresStepUp:decision.requiresStepUp,policyVersion:decision.policyVersion,expiresInSeconds:600};
  }catch(error){await client.query("ROLLBACK");throw error;}
  finally{client.release();}
 }
 async function consumePaymentApproval(userId:string,approvalId:string){
+ const account=await getConnectedAccountStatus(db!,userId);
+ if(!account.connected||!account.account?.verified)return {ok:false as const,error:"A verified PayPal account must remain connected before payment execution."};
  const client=await db!.connect();
  try{
   await client.query("BEGIN");
-  const result=await client.query("SELECT raw_prompt,recipient,purpose,amount::text,currency,payload_hash,policy_version,risk_level,status,expires_at FROM payment_approval_challenges WHERE id=$1 AND user_id=$2 FOR UPDATE",[approvalId,userId]);
+  const result=await client.query("SELECT raw_prompt,recipient,purpose,amount::text,currency,payload_hash,policy_version,risk_level,risk_score,requires_step_up,step_up_confirmed,status,expires_at FROM payment_approval_challenges WHERE id=$1 AND user_id=$2 FOR UPDATE",[approvalId,userId]);
   if(!result.rowCount){await client.query("ROLLBACK");return {ok:false as const,error:"Approval is invalid or belongs to another user."};}
-  const c=result.rows[0] as {raw_prompt:string;recipient:string;purpose:string;amount:string;currency:string;payload_hash:string;policy_version:string;risk_level:string;status:string;expires_at:Date};
+  const c=result.rows[0] as {raw_prompt:string;recipient:string;purpose:string;amount:string;currency:string;payload_hash:string;policy_version:string;risk_level:string;risk_score:number;requires_step_up:boolean;step_up_confirmed:boolean;status:string;expires_at:Date};
   if(c.status!=="PENDING"||new Date(c.expires_at).getTime()<=Date.now()){
    if(c.status==="PENDING")await client.query("UPDATE payment_approval_challenges SET status='EXPIRED' WHERE id=$1",[approvalId]);
    await client.query("COMMIT");return {ok:false as const,error:"Approval is expired, already used, or no longer pending."};
   }
+  if(c.requires_step_up&&!c.step_up_confirmed){await client.query("ROLLBACK");return {ok:false as const,error:"Additional high-value confirmation is required before this payment can proceed."};}
   await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))",[userId,c.currency.trim()]);
-  const normalized={userId,amount:c.amount,currency:c.currency.trim(),recipient:c.recipient,purpose:c.purpose};
-  const hash=paymentPayloadHash(normalized);
+  const normalized={userId,amount:c.amount,currency:c.currency.trim(),recipient:c.recipient,purpose:c.purpose},hash=paymentPayloadHash(normalized);
   if(hash!==c.payload_hash){
    await client.query("UPDATE payment_approval_challenges SET status='DENIED' WHERE id=$1",[approvalId]);
-   await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level,payload_hash) VALUES($1,'PAYMENT_EXECUTE',false,'Approval payload integrity check failed',$2,'high',$3)",[userId,c.policy_version,hash]);
+   await appendFinancialAudit(client,{userId,eventType:"PAYMENT_EXECUTE",allowed:false,reason:"Approval payload integrity check failed",policyVersion:c.policy_version,risk:"high",riskScore:100,payloadHash:hash});
    await client.query("COMMIT");return {ok:false as const,error:"Approval payload integrity check failed."};
   }
-  const exposure=await client.query("SELECT COALESCE(SUM(amount),0)::text AS spent,COUNT(*)::int AS count FROM payment_transactions WHERE user_id=$1 AND currency=$2 AND created_at>=NOW()-INTERVAL '24 hours' AND status NOT IN ('FAILED','CANCELLED','DENIED')",[userId,normalized.currency]);
-  const decision=evaluatePaymentPolicy(normalized,{dailySpent:Number(exposure.rows[0]?.spent||0),dailyCount:Number(exposure.rows[0]?.count||0)});
-  if(!decision.allowed){
+  const limits=await loadUserFinancialLimits(client,userId);
+  const exposure=await paymentExposure(client,userId,normalized.currency,normalized.recipient,normalized.amount,normalized.purpose,undefined,hash,approvalId);
+  const decision=evaluatePaymentPolicy(normalized,exposure,limits);
+  if(!decision.allowed||(decision.requiresStepUp&&!c.step_up_confirmed)){
    await client.query("UPDATE payment_approval_challenges SET status='DENIED' WHERE id=$1",[approvalId]);
-   await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level,payload_hash) VALUES($1,'PAYMENT_EXECUTE',false,$2,$3,$4,$5)",[userId,decision.reason,decision.policyVersion,decision.risk,hash]);
-   await client.query("COMMIT");return {ok:false as const,error:decision.reason};
+   const reason=decision.allowed?"A new high-value or elevated-risk condition requires additional confirmation.":decision.reason;
+   await appendFinancialAudit(client,{userId,eventType:"PAYMENT_EXECUTE",allowed:false,reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
+   await client.query("COMMIT");return {ok:false as const,error:reason};
   }
   const transactionId=randomUUID();
   await client.query("UPDATE payment_approval_challenges SET status='CONSUMED',consumed_at=NOW() WHERE id=$1 AND status='PENDING'",[approvalId]);
   await client.query("INSERT INTO payment_transactions(id,user_id,approval_id,raw_prompt,recipient,purpose,amount,currency,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'CREATING')",[transactionId,userId,approvalId,c.raw_prompt,c.recipient,c.purpose,c.amount,normalized.currency]);
-  await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level,payload_hash) VALUES($1,'PAYMENT_EXECUTE',true,$2,$3,$4,$5)",[userId,decision.reason,c.policy_version,c.risk_level,hash]);
+  await appendFinancialAudit(client,{userId,eventType:"PAYMENT_EXECUTE",allowed:true,reason:decision.reason,policyVersion:c.policy_version,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
   await client.query("COMMIT");
-  return {ok:true as const,transactionId,rawPrompt:c.raw_prompt,recipient:c.recipient,purpose:c.purpose,amount:c.amount,currency:normalized.currency,policyVersion:c.policy_version,risk:c.risk_level};
+  return {ok:true as const,transactionId,rawPrompt:c.raw_prompt,recipient:c.recipient,purpose:c.purpose,amount:c.amount,currency:normalized.currency,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore};
  }catch(error){await client.query("ROLLBACK");throw error;}
  finally{client.release();}
 }
 function splitPaymentInstructions(text:string){return text.split(/\s*(?:;|\n+|\bthen\b)\s*/i).map(x=>x.trim()).filter(Boolean);}
 async function createWorkflowOrder(workflowId:string,userId:string){
  assertPaymentEnvironment();
+ const account=await getConnectedAccountStatus(db!,userId);
+ if(!account.connected||!account.account?.verified)throw Error("Connect a verified PayPal account before executing a payment workflow.");
  const client=await db!.connect();
  let transactionId="",p:{id:string;sequence_no:number;recipient:string;purpose:string;amount:string;currency:string}|undefined,totalSteps=0;
  try{
@@ -189,18 +232,21 @@ async function createWorkflowOrder(workflowId:string,userId:string){
   p=q.rows[0] as {id:string;sequence_no:number;recipient:string;purpose:string;amount:string;currency:string};
   const currency=p.currency.trim();
   await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))",[userId,currency]);
-  const exposure=await client.query("SELECT COALESCE(SUM(amount),0)::text AS spent,COUNT(*)::int AS count FROM payment_transactions WHERE user_id=$1 AND currency=$2 AND created_at>=NOW()-INTERVAL '24 hours' AND status NOT IN ('FAILED','CANCELLED','DENIED')",[userId,currency]);
-  const decision=evaluatePaymentPolicy({userId,amount:p.amount,currency,recipient:p.recipient,purpose:p.purpose},{dailySpent:Number(exposure.rows[0]?.spent||0),dailyCount:Number(exposure.rows[0]?.count||0)});
+  const limits=await loadUserFinancialLimits(client,userId);
+   const candidate={userId,amount:p.amount,currency,recipient:p.recipient,purpose:p.purpose};
+   const hash=paymentPayloadHash(candidate);
+   const exposure=await paymentExposure(client,userId,currency,p.recipient,p.amount,p.purpose,undefined,hash);
+   const decision=evaluatePaymentPolicy(candidate,exposure,limits);
   if(!decision.allowed){
    await client.query("UPDATE payment_workflow_steps SET status='POLICY_BLOCKED',updated_at=NOW() WHERE id=$1",[p.id]);
    await client.query("UPDATE payment_workflows SET status='FAILED',updated_at=NOW() WHERE id=$1",[workflowId]);
-   await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level) VALUES($1,'WORKFLOW_EXECUTE',false,$2,$3,$4)",[userId,decision.reason,decision.policyVersion,decision.risk]);
+   await appendFinancialAudit(client,{userId,eventType:"WORKFLOW_EXECUTE",allowed:false,reason:decision.reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
    await client.query("COMMIT");throw Error("Workflow blocked by Financial Policy Engine: "+decision.reason);
   }
   transactionId=randomUUID();
   await client.query("UPDATE payment_workflow_steps SET status='CREATING',updated_at=NOW() WHERE id=$1 AND status='READY'",[p.id]);
   await client.query("INSERT INTO payment_transactions(id,user_id,raw_prompt,recipient,purpose,amount,currency,status,workflow_id,workflow_step_id) VALUES($1,$2,$3,$4,$5,$6,$7,'CREATING',$8,$9)",[transactionId,userId,"Approved workflow "+workflowId,p.recipient,p.purpose,p.amount,currency,workflowId,p.id]);
-  await client.query("INSERT INTO financial_policy_audit(user_id,event_type,allowed,reason,policy_version,risk_level,payload_hash) VALUES($1,'WORKFLOW_EXECUTE',true,$2,$3,$4,$5)",[userId,decision.reason,decision.policyVersion,decision.risk,paymentPayloadHash({userId,amount:p.amount,currency,recipient:p.recipient,purpose:p.purpose})]);
+  await appendFinancialAudit(client,{userId,eventType:"WORKFLOW_EXECUTE",allowed:true,reason:decision.reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
   await client.query("COMMIT");
  }catch(error){
   try{await client.query("ROLLBACK");}catch{}
@@ -229,6 +275,23 @@ async function route(req:IncomingMessage,res:ServerResponse){
  try{
   if(await handleObservabilityRoute(req,res,url,db))return;
   if(req.method==="GET"&&url.pathname==="/api/health")return send(res,200,{status:"ok",database:Boolean(db),paypalConfigured:Boolean(clientId&&secret),telegramWebhookConfigured:Boolean(process.env.BACKEND_SHARED_SECRET)});
+  if(req.method==="GET"&&url.pathname==="/api/auth/session"){
+    const userId=getAuthenticatedUser(req);
+    if(!userId)return send(res,401,{authenticated:false});
+    return send(res,200,{authenticated:true,user:{id:userId,provider:"telegram"}});
+  }
+  if(req.method==="POST"&&url.pathname==="/api/auth/telegram/session"){
+    const body=await read(req),initData=String(body.initData||"");
+    const identity=verifyTelegramWebAppInitData(initData);
+    if(!identity)return send(res,401,{error:"Telegram authentication could not be verified. Reopen Transactra from the Telegram bot."});
+    const cookie=createAuthenticatedSessionCookie(identity.userId);
+    res.writeHead(200,{"Content-Type":"application/json","Cache-Control":"no-store","Set-Cookie":cookie,"Referrer-Policy":"no-referrer"});
+    return res.end(JSON.stringify({authenticated:true,user:{id:identity.userId,provider:"telegram"},expiresIn:8*60*60}));
+  }
+  if(req.method==="POST"&&url.pathname==="/api/auth/telegram/logout"){
+    res.writeHead(200,{"Content-Type":"application/json","Cache-Control":"no-store","Set-Cookie":clearAuthenticatedSessionCookie()});
+    return res.end(JSON.stringify({authenticated:false}));
+  }
   if(req.method==="POST"&&url.pathname==="/telegram/webhook"){
    const expected=process.env.BACKEND_SHARED_SECRET||"",supplied=String(req.headers["x-transactra-edge-secret"]||"");
    if(!expected||!supplied)return send(res,401,{error:"Webhook authentication failed."});
@@ -240,7 +303,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
    try{await processTelegramUpdate(update);processedTelegramUpdates.add(updateId);if(processedTelegramUpdates.size>2000)processedTelegramUpdates.delete(processedTelegramUpdates.values().next().value!);return send(res,200,{ok:true});}
    catch(e){console.error("Telegram webhook processing failed:",e instanceof Error?e.message:"unknown error");return send(res,500,{error:"Telegram update processing failed."});}
   }
-  if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.PAYPAL_ENV||"sandbox"});
+  if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.PAYPAL_ENV||"sandbox",telegramBotUsername:process.env.TELEGRAM_BOT_USERNAME||""});
 
   // Telegram authenticates the owner; the browser receives a one-time launch ticket.
   if (req.method === "GET" && url.pathname === "/api/auth/paypal/connect") {
@@ -359,25 +422,37 @@ async function route(req:IncomingMessage,res:ServerResponse){
   if(req.method==="POST"&&url.pathname==="/api/payments/prepare"){
    if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
    await ensureDb();const userId=telegramUserId(req),b=await read(req),raw=String(b.text||"").trim();
-   const intent=await parse(raw),prepared=await createPaymentApproval(userId,raw,intent);
+   const intent=await parse(raw),idempotencyKey=String(req.headers["x-transactra-idempotency-key"]||""),prepared=await createPaymentApproval(userId,raw,intent,idempotencyKey||undefined);
    if(!prepared.ok)return send(res,422,{error:prepared.error});
    return send(res,201,prepared);
   }
   if(req.method==="POST"&&url.pathname==="/api/workflows/plan"){
    if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
-   await ensureWorkflowSchema();const userId=telegramUserId(req),b=await read(req),raw=String(b.text||"").trim();
+   await ensureWorkflowSchema();const userId=telegramUserId(req),b=await read(req),raw=String(b.text||"").trim(),idempotencyKey=String(req.headers["x-transactra-idempotency-key"]||"");
+   if(idempotencyKey&&!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey))return send(res,400,{error:"Invalid workflow idempotency key."});
    if(!raw||raw.length>4000)return send(res,400,{error:"Provide a workflow instruction under 4,000 characters."});
    const parts=splitPaymentInstructions(raw);
    if(parts.length<2||parts.length>8)return send(res,400,{error:"Use 2–8 payment instructions separated by semicolons, new lines, or 'then'."});
    const intents=[];for(const part of parts)intents.push(await parse(part));
-   const limits=getFinancialPolicyLimits(),plannedByCurrency=new Map<string,number>(),plannedCounts=new Map<string,number>();
+    if(idempotencyKey){
+     const existing=await db!.query("SELECT id,raw_prompt,status,step_count FROM payment_workflows WHERE user_id=$1 AND idempotency_key=$2",[userId,idempotencyKey]);
+     if(existing.rowCount){
+      if(existing.rows[0].raw_prompt!==raw)return send(res,409,{error:"Idempotency key was already used for a different workflow."});
+      const steps=await db!.query("SELECT sequence_no,recipient,purpose,amount::text,currency,status FROM payment_workflow_steps WHERE workflow_id=$1 ORDER BY sequence_no",[existing.rows[0].id]);
+      const totals=steps.rows.reduce((a:any,p:any)=>{a[p.currency]=(a[p.currency]||0)+Number(p.amount);return a;},{} as Record<string,number>);
+      return send(res,200,{workflowId:existing.rows[0].id,status:existing.rows[0].status,steps:steps.rows,totalAmountByCurrency:totals,idempotentReplay:true});
+     }
+    }
+
+   const limits=await loadUserFinancialLimits(db!,userId),plannedByCurrency=new Map<string,number>(),plannedCounts=new Map<string,number>();
    for(const p of intents){
-    const exposure=await paymentExposure(userId,p.currency),planned=plannedByCurrency.get(p.currency)||0,plannedCount=plannedCounts.get(p.currency)||0;
-    const decision=evaluatePaymentPolicy({userId,amount:p.amount,currency:p.currency,recipient:p.recipient,purpose:p.purpose},{dailySpent:exposure.dailySpent+planned,dailyCount:exposure.dailyCount+plannedCount},limits);
+    const candidate={userId,amount:p.amount,currency:p.currency,recipient:p.recipient,purpose:p.purpose},hash=paymentPayloadHash(candidate);
+    const exposure=await paymentExposure(db!,userId,p.currency,p.recipient,p.amount,p.purpose,undefined,hash),planned=plannedByCurrency.get(p.currency)||0,plannedCount=plannedCounts.get(p.currency)||0;
+    const decision=evaluatePaymentPolicy(candidate,{...exposure,dailySpent:exposure.dailySpent+planned,dailyCount:exposure.dailyCount+plannedCount},limits);
     if(!decision.allowed)return send(res,422,{error:"Workflow blocked by Financial Policy Engine: "+decision.reason,policyVersion:decision.policyVersion});
     plannedByCurrency.set(p.currency,planned+Number(p.amount));plannedCounts.set(p.currency,plannedCount+1);
    }
-   const workflowId=randomUUID();await db!.query("INSERT INTO payment_workflows(id,user_id,raw_prompt,status,step_count) VALUES($1,$2,$3,'PENDING_APPROVAL',$4)",[workflowId,userId,raw,parts.length]);
+   const workflowId=randomUUID();await db!.query("INSERT INTO payment_workflows(id,user_id,raw_prompt,status,step_count,idempotency_key) VALUES($1,$2,$3,'PENDING_APPROVAL',$4,$5)",[workflowId,userId,raw,parts.length,idempotencyKey||null]);
    for(let i=0;i<intents.length;i++){const p=intents[i]!;await db!.query("INSERT INTO payment_workflow_steps(id,workflow_id,sequence_no,recipient,purpose,amount,currency,status) VALUES($1,$2,$3,$4,$5,$6,$7,'PENDING')",[randomUUID(),workflowId,i+1,p.recipient,p.purpose,p.amount,p.currency]);}
    return send(res,201,{workflowId,status:"PENDING_APPROVAL",steps:intents.map((p,i)=>({sequence:i+1,...p})),totalAmountByCurrency:intents.reduce((a,p)=>{a[p.currency]=(a[p.currency]||0)+Number(p.amount);return a;},{} as Record<string,number>)});
   }
@@ -387,8 +462,14 @@ async function route(req:IncomingMessage,res:ServerResponse){
    await ensureWorkflowSchema();const userId=telegramUserId(req),id=wm[1]!,action=wm[2]||"",w=await db!.query("SELECT id,status,step_count FROM payment_workflows WHERE id=$1 AND user_id=$2",[id,userId]);
    if(!w.rowCount)return send(res,404,{error:"Payment workflow not found."});
    if(req.method==="GET"&&!action){const steps=await db!.query("SELECT sequence_no,recipient,purpose,amount::text,currency,status,paypal_order_id FROM payment_workflow_steps WHERE workflow_id=$1 ORDER BY sequence_no",[id]);return send(res,200,{workflow:w.rows[0],steps:steps.rows});}
-   if(req.method==="POST"&&action==="reject"){if(w.rows[0].status!=="PENDING_APPROVAL")return send(res,409,{error:"Only a pending workflow can be rejected."});await db!.query("UPDATE payment_workflows SET status='REJECTED',updated_at=NOW() WHERE id=$1",[id]);await db!.query("UPDATE payment_workflow_steps SET status='REJECTED',updated_at=NOW() WHERE workflow_id=$1 AND status='PENDING'",[id]);return send(res,200,{status:"REJECTED"});}
-   if(req.method==="POST"&&action==="approve"){const ok=await db!.query("UPDATE payment_workflows SET status='APPROVED',updated_at=NOW() WHERE id=$1 AND status='PENDING_APPROVAL' RETURNING id",[id]);if(!ok.rowCount)return send(res,409,{error:"Workflow is not awaiting approval or was already approved."});await db!.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE workflow_id=$1 AND sequence_no=1 AND status='PENDING'",[id]);return send(res,200,await createWorkflowOrder(id,userId));}
+   if(req.method==="POST"&&action==="reject"){
+     if(w.rows[0].status!=="PENDING_APPROVAL")return send(res,409,{error:"Only a pending workflow can be rejected."});
+     const client=await db!.connect();try{await client.query("BEGIN");const changed=await client.query("UPDATE payment_workflows SET status='REJECTED',updated_at=NOW() WHERE id=$1 AND user_id=$2 AND status='PENDING_APPROVAL' RETURNING id",[id,userId]);if(!changed.rowCount){await client.query("ROLLBACK");return send(res,409,{error:"Workflow was already decided."});}await client.query("UPDATE payment_workflow_steps SET status='REJECTED',updated_at=NOW() WHERE workflow_id=$1 AND status='PENDING'",[id]);await appendFinancialAudit(client,{userId,eventType:"WORKFLOW_REJECT",allowed:false,reason:"User rejected the payment workflow before order creation.",policyVersion:FINANCIAL_POLICY_VERSION,risk:"low",riskScore:0,payloadHash:createHash("sha256").update(id).digest("hex")});await client.query("COMMIT");return send(res,200,{status:"REJECTED"});}catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
+    }
+   if(req.method==="POST"&&action==="approve"){
+     const client=await db!.connect();try{await client.query("BEGIN");const ok=await client.query("UPDATE payment_workflows SET status='APPROVED',updated_at=NOW() WHERE id=$1 AND user_id=$2 AND status='PENDING_APPROVAL' RETURNING id",[id,userId]);if(!ok.rowCount){await client.query("ROLLBACK");return send(res,409,{error:"Workflow is not awaiting approval or was already approved."});}await client.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE workflow_id=$1 AND sequence_no=1 AND status='PENDING'",[id]);await appendFinancialAudit(client,{userId,eventType:"WORKFLOW_APPROVE",allowed:true,reason:"User explicitly approved the payment workflow; each step remains subject to fresh policy evaluation and PayPal buyer approval.",policyVersion:FINANCIAL_POLICY_VERSION,risk:"medium",riskScore:35,payloadHash:createHash("sha256").update(id).digest("hex")});await client.query("COMMIT");}catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
+     return send(res,200,await createWorkflowOrder(id,userId));
+    }
    if(req.method==="POST"&&action==="next"){if(!["APPROVED","IN_PROGRESS"].includes(String(w.rows[0].status)))return send(res,409,{error:"Workflow is not approved for execution."});return send(res,200,await createWorkflowOrder(id,userId));}
    return send(res,405,{error:"Method not allowed."});
   }
@@ -398,6 +479,19 @@ async function route(req:IncomingMessage,res:ServerResponse){
    await ensureDb();const q=await db!.query("SELECT id,recipient,purpose,amount::text,currency,status,paypal_order_id,created_at FROM payment_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",[telegramUserId(req)]);
    return send(res,200,{transactions:q.rows});
   }
+   if(req.method==="POST"&&url.pathname==="/api/payments/step-up"){
+    if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
+    await ensureDb();const userId=telegramUserId(req),b=await read(req),approvalId=String(b.approvalId||"");
+    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(approvalId))return send(res,400,{error:"A valid payment approval is required."});
+    const client=await db!.connect();
+    try{
+     await client.query("BEGIN");
+     const q=await client.query("UPDATE payment_approval_challenges SET step_up_confirmed=TRUE WHERE id=$1 AND user_id=$2 AND status='PENDING' AND requires_step_up=TRUE AND expires_at>NOW() RETURNING payload_hash,policy_version,risk_level,risk_score",[approvalId,userId]);
+     if(!q.rowCount){await client.query("ROLLBACK");return send(res,409,{error:"This payment does not require step-up or its approval has expired."});}
+     await appendFinancialAudit(client,{userId,eventType:"PAYMENT_STEP_UP",allowed:true,reason:"User explicitly confirmed the high-value or elevated-risk payment.",policyVersion:q.rows[0].policy_version,risk:q.rows[0].risk_level,riskScore:Number(q.rows[0].risk_score),payloadHash:q.rows[0].payload_hash});
+     await client.query("COMMIT");return send(res,200,{confirmed:true});
+    }catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
+   }
   if(req.method==="POST"&&url.pathname==="/api/orders"){
    if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
    await ensureDb();const b=await read(req),approvalId=String(b.approvalId||"");
@@ -416,34 +510,60 @@ async function route(req:IncomingMessage,res:ServerResponse){
    }catch(e){await db!.query("UPDATE payment_transactions SET status='FAILED',updated_at=NOW() WHERE id=$1",[id]);throw e;}
   }
   const m=url.pathname.match(/^\/api\/orders\/([A-Z0-9]+)\/capture$/i);
-  if(req.method==="POST"&&m){
-   if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
-   await ensureDb();assertPaymentEnvironment();const id=m[1]!,userId=telegramUserId(req);
-   const old=await db!.query("SELECT id,status,workflow_id,workflow_step_id FROM payment_transactions WHERE paypal_order_id=$1 AND user_id=$2",[id,userId]);
-   if(!old.rowCount)return send(res,404,{error:"PayPal order is not associated with this Telegram user."});
-   if(old.rows[0].status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true,workflowId:old.rows[0].workflow_id||undefined});
-   const claim=await db!.query("UPDATE payment_transactions SET status='CAPTURING',updated_at=NOW() WHERE id=$1 AND status='CREATED' RETURNING id",[old.rows[0].id]);
-   if(!claim.rowCount)return send(res,409,{error:"This order is already being captured or is not eligible for capture."});
-   try{
-    const t=await token();
-    const d=await paypal("/v2/checkout/orders/"+encodeURIComponent(id)+"/capture",t,"POST",{},String(old.rows[0].id)+"-capture") as {status?:string;purchase_units?:Array<{payments?:{captures?:Array<{id?:string;status?:string}>}} >};
-    const status=String(d.status||"UNKNOWN"),capture=d.purchase_units?.[0]?.payments?.captures?.[0],captureId=capture?.id||null;
-    const completed=status==="COMPLETED"&&capture?.status==="COMPLETED";
-    await db!.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE id=$3",[completed?"COMPLETED":"CAPTURE_PENDING",captureId,old.rows[0].id]);
-    let workflowId:string|undefined,workflowComplete:boolean|undefined;
-    if(old.rows[0].workflow_id&&old.rows[0].workflow_step_id){
-     workflowId=String(old.rows[0].workflow_id);
-     await db!.query("UPDATE payment_workflow_steps SET status=$1,updated_at=NOW() WHERE id=$2",[completed?"COMPLETED":"PAYMENT_PENDING",old.rows[0].workflow_step_id]);
-     if(completed){
-      const remaining=await db!.query("SELECT id FROM payment_workflow_steps WHERE workflow_id=$1 AND status NOT IN ('COMPLETED','REJECTED') ORDER BY sequence_no LIMIT 1",[workflowId]);
-      if(remaining.rowCount)await db!.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE id=$1 AND status='PENDING'",[remaining.rows[0].id]);
-      else{await db!.query("UPDATE payment_workflows SET status='COMPLETED',updated_at=NOW() WHERE id=$1 AND user_id=$2",[workflowId,userId]);workflowComplete=true;}
+   if(req.method==="POST"&&m){
+    if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
+    await ensureDb();assertPaymentEnvironment();const orderId=m[1]!,userId=telegramUserId(req);
+    const old=await db!.query("SELECT id,status,workflow_id,workflow_step_id,approval_id,amount::text,currency,recipient,purpose FROM payment_transactions WHERE paypal_order_id=$1 AND user_id=$2",[orderId,userId]);
+    if(!old.rowCount)return send(res,404,{error:"PayPal order is not associated with this Telegram user."});
+    const tx=old.rows[0] as {id:string;status:string;workflow_id:string|null;workflow_step_id:string|null;approval_id:string|null;amount:string;currency:string;recipient:string;purpose:string};
+    if(tx.status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true,workflowId:tx.workflow_id||undefined});
+    const account=await getConnectedAccountStatus(db!,userId);
+    if(!account.connected||!account.account?.verified)return send(res,403,{error:"A verified PayPal account must remain connected to capture this payment."});
+    const claim=await db!.query("UPDATE payment_transactions SET status='CAPTURING',updated_at=NOW() WHERE id=$1 AND status='CREATED' RETURNING id",[tx.id]);
+    if(!claim.rowCount)return send(res,409,{error:"This order is already being captured or is not eligible for capture."});
+    try{
+     const access=await token();
+     const order=await paypal("/v2/checkout/orders/"+encodeURIComponent(orderId),access,"GET") as {id?:string;status?:string;payer?:{payer_id?:string};purchase_units?:Array<{reference_id?:string;amount?:{currency_code?:string;value?:string}} >};
+     const unit=order.purchase_units?.[0],payerId=String(order.payer?.payer_id||"");
+     const buyerMatches=payerId===account.account.payerId,amountMatches=unit?.amount?.currency_code===tx.currency.trim()&&unit?.amount?.value===tx.amount,referenceMatches=unit?.reference_id===tx.id;
+     if(order.id!==orderId||order.status!=="APPROVED"||!buyerMatches||!amountMatches||!referenceMatches){
+      const reason=!buyerMatches?"PayPal buyer identity does not match the connected account.":!amountMatches?"PayPal order amount or currency does not match the approved transaction.":!referenceMatches?"PayPal order reference does not match the approved transaction.":"PayPal order is not in APPROVED state.";
+      const audit=await db!.connect();
+      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status='DENIED',updated_at=NOW() WHERE id=$1",[tx.id]);await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:false,reason,policyVersion:FINANCIAL_POLICY_VERSION,risk:"high",riskScore:100,payloadHash:paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose})});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
+      return send(res,403,{error:reason});
      }
-    }
-    return send(res,completed?200:202,{status:completed?"COMPLETED":"CAPTURE_PENDING",captureId,workflowId,workflowComplete});
-   }catch(e){await db!.query("UPDATE payment_transactions SET status='CREATED',updated_at=NOW() WHERE id=$1 AND status='CAPTURING'",[old.rows[0].id]);throw e;}
-  }
-  return send(res,404,{error:"Route not found."});
+     const limits=await loadUserFinancialLimits(db!,userId),hash=paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose});
+     const exposure=await paymentExposure(db!,userId,tx.currency.trim(),tx.recipient,tx.amount,tx.purpose,tx.id,hash);
+     const decision=evaluatePaymentPolicy({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose},exposure,limits);
+     let stepUpConfirmed=true;
+     if(tx.approval_id){const approval=await db!.query("SELECT step_up_confirmed FROM payment_approval_challenges WHERE id=$1 AND user_id=$2",[tx.approval_id,userId]);stepUpConfirmed=Boolean(approval.rows[0]?.step_up_confirmed);}
+     if(!decision.allowed||(decision.requiresStepUp&&tx.approval_id&&!stepUpConfirmed)){
+      const reason=decision.allowed?"Policy now requires an additional high-value confirmation; capture is blocked.":decision.reason;
+      const audit=await db!.connect();
+      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status='DENIED',updated_at=NOW() WHERE id=$1",[tx.id]);await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:false,reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
+      return send(res,409,{error:reason});
+     }
+     const captured=await paypal("/v2/checkout/orders/"+encodeURIComponent(orderId)+"/capture",access,"POST",{},tx.id+"-capture") as {status?:string;purchase_units?:Array<{payments?:{captures?:Array<{id?:string;status?:string}>}} >};
+     const status=String(captured.status||"UNKNOWN"),capture=captured.purchase_units?.[0]?.payments?.captures?.[0],captureId=capture?.id||null,completed=status==="COMPLETED"&&capture?.status==="COMPLETED";
+     const audit=await db!.connect();let workflowComplete:boolean|undefined;
+     try{
+      await audit.query("BEGIN");
+      await audit.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE id=$3",[completed?"COMPLETED":"CAPTURE_PENDING",captureId,tx.id]);
+      await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:completed,reason:completed?"PayPal confirmed the capture.":"PayPal capture is pending or incomplete.",policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
+      if(tx.workflow_id&&tx.workflow_step_id){
+       await audit.query("UPDATE payment_workflow_steps SET status=$1,updated_at=NOW() WHERE id=$2",[completed?"COMPLETED":"PAYMENT_PENDING",tx.workflow_step_id]);
+       if(completed){
+        const remaining=await audit.query("SELECT id FROM payment_workflow_steps WHERE workflow_id=$1 AND status NOT IN ('COMPLETED','REJECTED') ORDER BY sequence_no LIMIT 1",[tx.workflow_id]);
+        if(remaining.rowCount)await audit.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE id=$1 AND status='PENDING'",[remaining.rows[0].id]);
+        else{await audit.query("UPDATE payment_workflows SET status='COMPLETED',updated_at=NOW() WHERE id=$1 AND user_id=$2",[tx.workflow_id,userId]);workflowComplete=true;}
+       }
+      }
+      await audit.query("COMMIT");
+     }catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
+     return send(res,completed?200:202,{status:completed?"COMPLETED":"CAPTURE_PENDING",captureId,workflowId:tx.workflow_id||undefined,workflowComplete});
+    }catch(e){await db!.query("UPDATE payment_transactions SET status='CREATED',updated_at=NOW() WHERE id=$1 AND status='CAPTURING'",[tx.id]);throw e;}
+   }
+   return send(res,404,{error:"Route not found."});
  }catch(e){return send(res,500,{error:e instanceof Error?e.message:"Unexpected server error"});}
 }
 const server=createServer((req,res)=>{void route(req,res);});server.listen(port,host,()=>console.log("Transactra API listening at http://"+host+":"+port));

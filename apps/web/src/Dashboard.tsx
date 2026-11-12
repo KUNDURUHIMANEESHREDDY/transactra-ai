@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+declare global { interface Window { Telegram?: { WebApp?: { initData:string; ready:()=>void; expand:()=>void; close:()=>void } } } }
 type Section = "overview" | "transactions" | "agents" | "logs" | "traces" | "policies" | "integrations";
 type Transaction = { id:string; recipient:string; purpose:string; amount:string; currency:string; status:string; paypal_order_id?:string; created_at:string };
 type Agent = { id:string; name:string; department:string; lifecycle_status:string; active_tasks?:number; succeeded?:number; failed?:number };
@@ -24,6 +25,7 @@ export default function Dashboard(){
  const [transactions,setTransactions]=useState<Transaction[]>([]),[agents,setAgents]=useState<Agent[]>([]);
  const [logs,setLogs]=useState<EventRow[]>([]),[traces,setTraces]=useState<EventRow[]>([]),[policies,setPolicies]=useState<Policy[]>([]),[providers,setProviders]=useState<Provider[]>([]);
  const [loading,setLoading]=useState(true),[error,setError]=useState(""),[lastUpdated,setLastUpdated]=useState<Date|null>(null);
+ const [authenticated,setAuthenticated]=useState<boolean|null>(null),[authMessage,setAuthMessage]=useState("Verifying Telegram session…"),[userId,setUserId]=useState(""),[botUsername,setBotUsername]=useState("");
  const [query,setQuery]=useState(""),[status,setStatus]=useState("all"),[selectedTrace,setSelectedTrace]=useState<EventRow|null>(null);
  const load=useCallback(async()=>{
   setLoading(true);setError("");
@@ -45,13 +47,36 @@ export default function Dashboard(){
   }catch(e){setError(e instanceof Error?e.message:"Dashboard data could not be loaded.");}
   finally{setLoading(false);}
  },[]);
- useEffect(()=>{void load();const timer=window.setInterval(()=>void load(),15000);return()=>window.clearInterval(timer);},[load]);
+ useEffect(()=>{
+  let active=true;
+  const start=async()=>{
+   try{
+    const config=await fetch("/api/config").then(r=>r.ok?r.json():{});
+    if(active)setBotUsername(String(config.telegramBotUsername||""));
+    const existing=await fetch("/api/auth/session",{credentials:"same-origin"});
+    if(existing.ok){const data=await existing.json();if(active){setAuthenticated(true);setUserId(data.user?.id||"");}return;}
+    const webApp=window.Telegram?.WebApp;
+    webApp?.ready();webApp?.expand();
+    if(!webApp?.initData){if(active){setAuthenticated(false);setAuthMessage("Open this dashboard from the Transactra Telegram bot to sign in securely.");}return;}
+    setAuthMessage("Verifying your Telegram identity…");
+    const response=await fetch("/api/auth/telegram/session",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({initData:webApp.initData})});
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||"Telegram sign-in failed.");
+    if(active){setAuthenticated(true);setUserId(data.user?.id||"");}
+   }catch(e){if(active){setAuthenticated(false);setAuthMessage(e instanceof Error?e.message:"Unable to authenticate with Telegram.");}}
+  };
+  void start();return()=>{active=false;};
+ },[]);
+ useEffect(()=>{if(authenticated!==true)return;void load();const timer=window.setInterval(()=>void load(),15000);return()=>window.clearInterval(timer);},[authenticated,load]);
+ const logout=async()=>{await fetch("/api/auth/telegram/logout",{method:"POST",credentials:"same-origin"});setAuthenticated(false);setUserId("");setAuthMessage("You have signed out.");};
  const filteredTx=useMemo(()=>transactions.filter(x=>(status==="all"||x.status.toLowerCase()===status)&&[x.recipient,x.purpose,x.id,x.paypal_order_id||""].join(" ").toLowerCase().includes(query.toLowerCase())),[transactions,status,query]);
  const filteredLogs=useMemo(()=>logs.filter(x=>[x.event_type,x.action,x.actor_id,x.message,x.outcome,x.task_id].join(" ").toLowerCase().includes(query.toLowerCase())),[logs,query]);
  const filteredTraces=useMemo(()=>traces.filter(x=>[x.correlation_id,x.task_id,x.capability,x.resource,x.outcome,x.message].join(" ").toLowerCase().includes(query.toLowerCase())),[traces,query]);
  const title=nav.find(x=>x.id===section)?.label||"Overview";
  const group=[...new Set(nav.map(x=>x.group))];
  const metric=(label:string,value:string|number,note:string,icon:string)=><div className="ops-metric" key={label}><div className="ops-metric-top"><span>{label}</span><i>{icon}</i></div><strong>{value}</strong><small>{note}</small></div>;
+ if(authenticated===null)return <div className="ops-auth-screen"><div className="ops-auth-card"><span className="ops-mark"><i/><i/><i/></span><h1>Transactra</h1><p>{authMessage}</p><div className="ops-auth-spinner"/></div></div>;
+ if(authenticated===false)return <div className="ops-auth-screen"><div className="ops-auth-card"><span className="ops-mark"><i/><i/><i/></span><h1>Transactra Control Center</h1><p>{authMessage}</p>{botUsername?<a className="ops-auth-button" href={"https://t.me/"+botUsername+"?start=dashboard"}>Open in Telegram ↗</a>:<p className="ops-auth-note">Set TELEGRAM_BOT_USERNAME and DASHBOARD_URL in the API and bot configuration to enable the secure sign-in link.</p>}<small>Authentication is verified by Telegram. Your payment and agent data is never shown before sign-in.</small></div></div>;
  return <div className="ops-shell">
   <aside className="ops-sidebar">
    <a className="ops-brand" href="#" onClick={e=>{e.preventDefault();setSection("overview");}}><span className="ops-mark"><i/><i/><i/></span><span>transactra<span className="ops-brand-dot">.</span><small>CONTROL CENTER</small></span></a>
@@ -59,7 +84,7 @@ export default function Dashboard(){
    <div className="ops-sidebar-bottom"><div className="ops-env"><span className="ops-live-dot"/><div><b>PAYPAL SANDBOX</b><small>Test environment</small></div><em>TEST</em></div><div className="ops-user"><span> T </span><div><b>Workspace owner</b><small>Transactra operator</small></div><i>···</i></div></div>
   </aside>
   <main className="ops-main">
-   <header className="ops-topbar"><div><span>Workspace</span><b>/</b><strong>{title}</strong></div><div className="ops-top-actions"><span className="ops-system"><i/> SYSTEM {overview.database?"CONNECTED":"STATUS UNKNOWN"}</span><button onClick={()=>void load()} disabled={loading}>{loading?"Refreshing…":"↻ Refresh"}</button><button className="ops-payments-link" onClick={()=>{window.location.search="?view=payments";}}>Payment desk ↗</button><span className="ops-avatar">T</span></div></header>
+   <header className="ops-topbar"><div><span>Workspace</span><b>/</b><strong>{title}</strong></div><div className="ops-top-actions"><span className="ops-system"><i/> SYSTEM {overview.database?"CONNECTED":"STATUS UNKNOWN"}</span><button onClick={()=>void load()} disabled={loading}>{loading?"Refreshing…":"↻ Refresh"}</button><button className="ops-payments-link" onClick={()=>{window.location.search="?view=payments";}}>Payment desk ↗</button><button className="ops-avatar" title={"Signed in as "+userId+" · Click to sign out"} onClick={()=>void logout()}>T</button></div></header>
    <div className="ops-content">
     <div className="ops-page-head"><div><div className="ops-eyebrow"><i/> OPERATIONS & INTELLIGENCE</div><h1>{section==="overview"?"Good morning.":title}<span>.</span></h1><p>{section==="overview"?"A live view of payments, autonomous work, and system activity.":section==="transactions"?"Search, inspect, and reconcile every recorded payment.":section==="agents"?"Monitor the agents coordinating work across your Transactra workspace.":section==="logs"?"A searchable event stream across agents, tools, and system services.":section==="traces"?"Follow each execution from task creation through tool calls and outcomes.":section==="policies"?"Review financial policy decisions, approvals, and blocked actions.":"Monitor the services connected to your Transactra environment."}</p></div><div className="ops-head-meta"><span className="ops-date">{lastUpdated?"UPDATED "+lastUpdated.toLocaleTimeString():"AWAITING DATA"}</span><span className="ops-range">AUTO-REFRESH · 15S</span></div></div>
     {error&&<div className="ops-alert"><b>!</b><div><strong>Live data connection unavailable</strong><p>{error}</p><button onClick={()=>void load()}>Retry connection ↗</button></div></div>}

@@ -6,7 +6,7 @@ const backendSharedSecret = process.env.BACKEND_SHARED_SECRET || "";
 const apiBase = (process.env.API_BASE_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const telegramBase = "https://api.telegram.org/bot" + token;
 type Intent = { amount:string; currency:string; recipient:string; purpose:string; confidence:number; source:string };
-type Pending = { intent:Intent; rawPrompt:string; approvalId:string; orderId?:string };
+type Pending = { intent:Intent; rawPrompt:string; approvalId:string; requiresStepUp:boolean; orderId?:string };
 const pending = new Map<string, Pending>();
 let offset = 0;
 
@@ -19,9 +19,9 @@ async function tg<T=unknown>(method:string, body:Record<string,unknown> = {}):Pr
   if (!response.ok || !result.ok) throw new Error(result.description || "Telegram API request failed");
   return result.result;
 }
-async function api<T=Record<string,unknown>>(path:string, method="GET", body?:unknown):Promise<T> {
+async function api<T=Record<string,unknown>>(path:string, method="GET", body?:unknown, idempotencyKey?:string):Promise<T> {
   const response = await fetch(apiBase + path, {
-    method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId,"x-transactra-edge-secret":backendSharedSecret},
+    method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId,"x-transactra-edge-secret":backendSharedSecret,...(idempotencyKey?{"x-transactra-idempotency-key":idempotencyKey}:{})},
     ...(body===undefined?{}:{body:JSON.stringify(body)}), signal:AbortSignal.timeout(130000)
   });
   const data = await response.json() as T & {error?:string};
@@ -44,8 +44,14 @@ function owner(update:any) {
 async function handleMessage(message:any) {
   const chatId=message.chat.id, text=String(message.text||"").trim();
   if (!text) return;
+  if (text==="/dashboard" || text==="/start dashboard") {
+    const dashboardUrl=process.env.DASHBOARD_URL||"";
+    try { const parsed=new URL(dashboardUrl); if(parsed.protocol!=="https:")throw new Error("DASHBOARD_URL must use HTTPS."); await say(chatId,"Open your secure Transactra Control Center. Telegram will authenticate you automatically.",{inline_keyboard:[[{text:"Open dashboard",web_app:{url:parsed.toString()}}]]}); }
+    catch { await say(chatId,"Dashboard sign-in is not configured yet. Set DASHBOARD_URL to your HTTPS dashboard URL."); }
+    return;
+  }
   if (text==="/start" || text.startsWith("/start ")) {
-    await say(chatId,"Welcome to Transactra. Your Telegram payment desk is ready.\n\nSend one payment or a multi-step plan separated by semicolons, new lines, or ΓÇ£thenΓÇ¥. Send ΓÇ£connect paypalΓÇ¥ to link your account. Use /history, /summary and /help. Every plan requires owner approval, and each PayPal checkout requires buyer approval.");
+    await say(chatId,"Welcome to Transactra. Your Telegram payment desk is ready.\n\nSend one payment or a multi-step plan separated by semicolons, new lines, or ΓÇ£thenΓÇ¥. Send ΓÇ£connect paypalΓÇ¥ to link your account. Use /dashboard to open the live operations console, /history, /summary and /help. Every plan requires owner approval, and each PayPal checkout requires buyer approval.");
     return;
   }
   if ((text.toLowerCase()==="connect paypal" || text.toLowerCase()==="connect to paypal") || text==="/connect" || text==="/paypal") {
@@ -67,7 +73,7 @@ async function handleMessage(message:any) {
     return;
   }
   if (text==="/help") {
-    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2ΓÇô8 step plan separated by semicolons, new lines, or ΓÇ£thenΓÇ¥. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/ai <message> - chat with CloudPilot AI\n/connect - securely connect your PayPal account\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
+    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2ΓÇô8 step plan separated by semicolons, new lines, or ΓÇ£thenΓÇ¥. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/ai <message> - chat with CloudPilot AI\n/connect - securely connect your PayPal account\n/dashboard - open your live operations console\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
     return;
   }
   if (text==="/cancel") {
@@ -106,13 +112,13 @@ async function handleMessage(message:any) {
     return;
   }
   try {
-    const data=await api<{approvalId:string;intent:Intent;risk:string;expiresInSeconds:number}>("/api/payments/prepare","POST",{text});
+    const data=await api<{approvalId:string;intent:Intent;risk:string;riskScore:number;requiresStepUp:boolean;expiresInSeconds:number}>("/api/payments/prepare","POST",{text},"telegram:"+message.chat.id+":"+message.message_id);
     const id=randomUUID().slice(0,12);
-    pending.set(id,{intent:data.intent,rawPrompt:text,approvalId:data.approvalId});
+    pending.set(id,{intent:data.intent,rawPrompt:text,approvalId:data.approvalId,requiresStepUp:data.requiresStepUp});
     const p=data.intent;
     await say(chatId,
       "PAYMENT DRAFT ├é┬╖ REVIEW REQUIRED\n\nAmount: "+money(p.amount,p.currency)+"\nRecipient label: "+p.recipient+"\nPurpose: "+p.purpose+"\nCurrency: "+p.currency+"\n\nAI extraction: "+(p.source==="model"?"AI model":"local parser")+"\nFinancial Policy: "+data.risk.toUpperCase()+" RISK · explicit approval required · expires in "+Math.floor(data.expiresInSeconds/60)+" min\n\nThis recipient is a transaction label. PayPal Checkout charges the merchant connected to the configured PayPal app. No money moves until you approve and complete PayPal checkout.",
-      keyboard([[{text:"Approve & continue",callback_data:"approve:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
+      keyboard([[{text:data.requiresStepUp?"Review high-value payment":"Approve & continue",callback_data:data.requiresStepUp?"review:"+id:"approve:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
   } catch(e) { await say(chatId,e instanceof Error?e.message:"I couldn't understand that payment. Try ├óΓé¼┼ôPay $25 to Alex for dinner├óΓé¼┬¥."); }
 }
 async function handleCallback(query:any) {
@@ -155,6 +161,19 @@ async function handleCallback(query:any) {
   }
   const draft=pending.get(id);
   if (!draft) return void await say(chatId,"This payment draft has expired. Send the request again.");
+  if(action==="review"){
+    if(!draft.requiresStepUp)return void await say(chatId,"This payment does not require high-value confirmation.");
+    await say(chatId,"HIGH-VALUE PAYMENT CONFIRMATION\n\nReview the amount, recipient and purpose again. A separate confirmation is required before the normal payment approval.",keyboard([[{text:"I confirm this high-value payment",callback_data:"confirm:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
+    return;
+  }
+  if(action==="confirm"){
+    if(!draft.requiresStepUp)return void await say(chatId,"This payment does not require high-value confirmation.");
+    try{
+      await api("/api/payments/step-up","POST",{approvalId:draft.approvalId});
+      await say(chatId,"ADDITIONAL CONFIRMATION RECORDED\n\nNow approve the exact transaction to create its PayPal order.",keyboard([[{text:"Approve & create PayPal order",callback_data:"approve:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
+    }catch(e){await say(chatId,e instanceof Error?e.message:"High-value confirmation failed. No PayPal order was created.");}
+    return;
+  }
   if (action==="discard") { pending.delete(id); return void await say(chatId,"Payment draft discarded. No PayPal order was created."); }
   if (action==="approve") {
     try {
@@ -180,6 +199,7 @@ async function main() {
   if (webhook.url) throw new Error("A Telegram webhook is already configured. Set TELEGRAM_CLEAR_WEBHOOK=true once to switch this bot to polling, then restart it.");
   await tg("setMyCommands",{commands:[
     {command:"start",description:"Open your Transactra payment desk"},
+    {command:"dashboard",description:"Open the live operations dashboard"},
     {command:"ai",description:"Chat with CloudPilot AI"},
     {command:"history",description:"Show recent transactions"},
     {command:"summary",description:"Show captured payment totals"},
