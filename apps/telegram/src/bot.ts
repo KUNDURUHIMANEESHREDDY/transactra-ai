@@ -24,7 +24,7 @@ async function tg<T=unknown>(method:string, body:Record<string,unknown> = {}):Pr
 }
 async function api<T=Record<string,unknown>>(path:string, method="GET", body?:unknown):Promise<T> {
   const response = await fetch(apiBase + path, {
-    method, headers:{"Content-Type":"application/json"},
+    method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId},
     ...(body===undefined?{}:{body:JSON.stringify(body)}), signal:AbortSignal.timeout(20000)
   });
   const data = await response.json() as T & {error?:string};
@@ -48,11 +48,11 @@ async function handleMessage(message:any) {
   const chatId=message.chat.id, text=String(message.text||"").trim();
   if (!text) return;
   if (text==="/start" || text.startsWith("/start ")) {
-    await say(chatId,"Welcome to Transactra. Your Telegram payment desk is ready.\n\nSend a payment request in plain language, or use /history, /summary and /help. Every payment requires your confirmation before PayPal checkout.");
+    await say(chatId,"Welcome to Transactra. Your Telegram payment desk is ready.\n\nSend one payment or a multi-step plan separated by semicolons, new lines, or “then”. Use /history, /summary and /help. Every plan requires owner approval, and each PayPal checkout requires buyer approval.");
     return;
   }
   if (text==="/help") {
-    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend a payment request, e.g. Pay 25 USD to Alex for dinner.\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
+    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2–8 step plan separated by semicolons, new lines, or “then”. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
     return;
   }
   if (text==="/cancel") {
@@ -81,6 +81,15 @@ async function handleMessage(message:any) {
     return;
   }
   if (text.startsWith("/")) { await say(chatId,"Unknown command. Send /help to see what I can do."); return; }
+  if (/[;\n]|\bthen\b/i.test(text)) {
+    try {
+      const plan=await api<{workflowId:string;steps:Array<{sequence:number;amount:string;currency:string;recipient:string;purpose:string;source:string}>;totalAmountByCurrency:Record<string,number>}>("/api/workflows/plan","POST",{text});
+      const lines=plan.steps.map(s=>s.sequence+". "+money(s.amount,s.currency)+" → "+s.recipient+" ("+s.purpose+")");
+      const totals=Object.entries(plan.totalAmountByCurrency).map(([c,v])=>money(v.toFixed(2),c)).join(", ");
+      await say(chatId,"AGENT PAYMENT PLAN · "+plan.steps.length+" STEPS\n\n"+lines.join("\n")+"\n\nTotal planned: "+totals+"\n\nAll steps are stored as a draft. Approving authorizes Transactra to create the first PayPal order; each checkout still requires your PayPal buyer approval before capture.",keyboard([[{text:"Approve entire plan",callback_data:"workflowapprove:"+plan.workflowId},{text:"Reject plan",callback_data:"workflowreject:"+plan.workflowId}]]));
+    } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not prepare this payment workflow."); }
+    return;
+  }
   try {
     const data=await api<{intent:Intent}>("/api/parse","POST",{text});
     const id=randomUUID().slice(0,12);
@@ -96,13 +105,33 @@ async function handleCallback(query:any) {
   await tg("answerCallbackQuery",{callback_query_id:query.id});
   const [action,id]=data.split(":");
   if (!chatId || !id) return;
+  if (action==="workflowreject") {
+    try { await api("/api/workflows/"+id+"/reject","POST",{}); await say(chatId,"Payment plan rejected. No PayPal orders were created."); }
+    catch(e) { await say(chatId,e instanceof Error?e.message:"Could not reject the payment plan."); }
+    return;
+  }
+  if (action==="workflowapprove") {
+    try {
+      const result=await api<{workflowId:string;step:number;totalSteps:number;orderId:string;approveUrl:string;amount:string;currency:string;recipient:string;purpose:string}>("/api/workflows/"+id+"/approve","POST",{});
+      await say(chatId,"PLAN APPROVED · STEP "+result.step+"/"+result.totalSteps+"\n\n"+money(result.amount,result.currency)+" · "+result.recipient+"\n"+result.purpose+"\n\nOpen PayPal, complete buyer approval, then return here to capture this step. Later steps remain queued until this capture is verified.",keyboard([[{text:"Open PayPal checkout",url:result.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+result.orderId}]]));
+    } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not approve the payment plan."); }
+    return;
+  }
   if (action==="capture") {
     try {
-      const result=await api<{status:string;captureId?:string}>("/api/orders/"+encodeURIComponent(id)+"/capture","POST",{});
+      const result=await api<{status:string;captureId?:string;workflowId?:string;workflowComplete?:boolean}>("/api/orders/"+encodeURIComponent(id)+"/capture","POST",{});
       if (result.status==="COMPLETED") {
         const history=await api<{transactions:Array<{recipient:string;purpose:string;amount:string;currency:string;status:string;paypal_order_id:string}>}>("/api/transactions");
         const tx=history.transactions.find(x=>x.paypal_order_id===id);
         await say(chatId,"PAYMENT CAPTURED [OK]\n\n"+(tx?"Amount: "+money(tx.amount,tx.currency)+"\nRecipient label: "+tx.recipient+"\nPurpose: "+tx.purpose+"\n":"")+"PayPal order: "+id+"\nPayPal capture: "+(result.captureId||"confirmed")+"\n\nThis status came from PayPal's capture response.");
+        if(result.workflowId){
+          if(result.workflowComplete)await say(chatId,"AGENT WORKFLOW COMPLETE\n\nAll approved payment steps have been captured and verified by PayPal.");
+          else{
+            const next=await api<{step?:number;totalSteps?:number;orderId?:string;approveUrl?:string;amount?:string;currency?:string;recipient?:string;purpose?:string;complete?:boolean}>("/api/workflows/"+result.workflowId+"/next","POST",{});
+            if(next.approveUrl&&next.orderId)await say(chatId,"NEXT APPROVED STEP · "+next.step+"/"+next.totalSteps+"\n\n"+money(String(next.amount),String(next.currency))+" · "+next.recipient+"\n"+next.purpose+"\n\nOpen PayPal to approve this payment. No capture has happened yet.",keyboard([[{text:"Open PayPal checkout",url:next.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+next.orderId}]]));
+            else if(next.complete)await say(chatId,"AGENT WORKFLOW COMPLETE\n\nAll approved payment steps have been processed.");
+          }
+        }
       } else {
         await say(chatId,"PayPal returned status: "+result.status+". The payment is not marked completed. If you have just approved checkout, wait a moment and try again.");
       }

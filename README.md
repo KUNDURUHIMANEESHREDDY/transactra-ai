@@ -6,12 +6,14 @@ Built for the PayPal AI Hackathon using the free PayPal Sandbox.
 
 ## Telegram-first demo flow
 
-1. Message your private Transactra bot: “Pay $24.50 to Alex for dinner”.
+1. Message your private Transactra bot: “Pay $24.50 to Alex for dinner”, or send a multi-step instruction separated by semicolons/new lines/“then”.
 2. The assistant extracts amount, currency, recipient label and purpose. The built-in parser works without an AI-provider key; an optional OpenAI-compatible model endpoint can be configured.
-3. Review the payment summary and tap **Approve & continue** or **Discard**.
+3. For a workflow, review all 2–8 ordered steps and currency totals, then tap **Approve entire plan** or **Reject plan**. For a single payment, approve or discard its draft.
 4. Tap **Open PayPal checkout** and sign in with a PayPal Sandbox personal test account.
 5. Return to Telegram and tap **I've completed PayPal approval**. The server captures through PayPal Orders API v2.
-6. Ask for `/history` or `/summary` to inspect transactions.
+6. For a multi-step plan, Transactra creates one PayPal order at a time. After each PayPal-confirmed capture, it advances to the next approved step; `/history` and `/summary` show recorded results.
+
+See [Agentic payment workflows](docs/AGENTIC-PAYMENT-WORKFLOWS.md) for the approval state machine and supported instruction syntax.
 
 The web app is an optional dashboard, not a requirement for day-to-day control.
 

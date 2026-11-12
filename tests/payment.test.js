@@ -3,3 +3,7 @@ function parse(text){const m=text.match(/(?:\b(?:USD|EUR|GBP|INR|CAD|AUD|SGD|JPY
 test("parses USD amount, recipient and purpose",()=>assert.deepEqual(parse("Pay $24.50 to Alex for dinner"),{amount:"24.50",currency:"USD",recipient:"Alex",purpose:"dinner"}));
 test("detects INR from rupee symbol",()=>assert.equal(parse("Pay ₹850 to Riya for cab fare").currency,"INR"));
 test("does not invent a recipient",()=>assert.equal(parse("Pay $50 for groceries").recipient,undefined));
+function splitWorkflow(text){return text.split(/\s*(?:;|\n+|\bthen\b)\s*/i).map(x=>x.trim()).filter(Boolean);}
+test("splits ordered payment workflows on semicolons and then",()=>assert.deepEqual(splitWorkflow("Pay $45 to Alex for design; then pay $80 to Morgan for hosting"),["Pay $45 to Alex for design","pay $80 to Morgan for hosting"]));
+test("splits multiline payment workflows without empty steps",()=>assert.deepEqual(splitWorkflow("Pay ₹850 to Riya for travel\n\nPay $20 to Alex for lunch"),["Pay ₹850 to Riya for travel","Pay $20 to Alex for lunch"]));
+test("rejects unsupported one-step and oversized workflow plans",()=>{assert.ok(splitWorkflow("Pay $25 to Alex").length<2);assert.ok(splitWorkflow(Array.from({length:9},(_,i)=>"Pay $"+(i+1)+" to Person"+i).join(";")).length>8);});

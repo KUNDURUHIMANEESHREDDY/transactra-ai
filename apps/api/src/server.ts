@@ -31,12 +31,70 @@ async function parse(text:string):Promise<Intent>{
 async function ensureDb(){if(!db)throw Error("DATABASE_URL is required. Start PostgreSQL with docker compose and configure .env.");await db.query("CREATE TABLE IF NOT EXISTS payment_transactions(id UUID PRIMARY KEY,raw_prompt TEXT NOT NULL,recipient TEXT NOT NULL,purpose TEXT NOT NULL,amount NUMERIC(18,2) NOT NULL CHECK(amount>0),currency CHAR(3) NOT NULL,status TEXT NOT NULL,paypal_order_id TEXT UNIQUE,paypal_capture_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");}
 async function token(){if(!clientId||!secret)throw Error("PayPal Sandbox credentials are not configured on the server.");const auth=Buffer.from(clientId+":"+secret).toString("base64");const r=await fetch(paypalBase+"/v1/oauth2/token",{method:"POST",headers:{Authorization:"Basic "+auth,"Content-Type":"application/x-www-form-urlencoded"},body:"grant_type=client_credentials"});const d=await r.json() as {access_token?:string;error_description?:string};if(!r.ok||!d.access_token)throw Error(d.error_description||"PayPal authentication failed.");return d.access_token;}
 async function paypal(path:string,t:string,method:string,payload?:unknown,requestId?:string){const r=await fetch(paypalBase+path,{method,headers:{Authorization:"Bearer "+t,"Content-Type":"application/json",...(requestId?{"PayPal-Request-Id":requestId}:{})},...(payload?{body:JSON.stringify(payload)}:{})});const d=await r.json() as Record<string,unknown>;if(!r.ok)throw Error(String(d.message||d.name||"PayPal request failed"));return d;}
+async function ensureWorkflowSchema(){
+ await ensureDb();
+ await db!.query("CREATE TABLE IF NOT EXISTS payment_workflows(id UUID PRIMARY KEY,raw_prompt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('PENDING_APPROVAL','APPROVED','IN_PROGRESS','COMPLETED','REJECTED','FAILED')),step_count INTEGER NOT NULL CHECK(step_count BETWEEN 2 AND 8),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+ await db!.query("CREATE TABLE IF NOT EXISTS payment_workflow_steps(id UUID PRIMARY KEY,workflow_id UUID NOT NULL REFERENCES payment_workflows(id),sequence_no INTEGER NOT NULL CHECK(sequence_no BETWEEN 1 AND 8),recipient TEXT NOT NULL,purpose TEXT NOT NULL,amount NUMERIC(18,2) NOT NULL CHECK(amount>0),currency CHAR(3) NOT NULL,status TEXT NOT NULL DEFAULT 'PENDING',paypal_order_id TEXT UNIQUE,approve_url TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(workflow_id,sequence_no))");
+ await db!.query("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS workflow_id UUID REFERENCES payment_workflows(id)");
+ await db!.query("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS workflow_step_id UUID REFERENCES payment_workflow_steps(id)");
+}
+function requireOwner(req:IncomingMessage){const expected=String(process.env.TELEGRAM_OWNER_ID||"");const supplied=String(req.headers["x-transactra-owner-id"]||"");return Boolean(expected&&supplied&&expected===supplied);}
+function splitPaymentInstructions(text:string){return text.split(/\s*(?:;|\n+|\bthen\b)\s*/i).map(x=>x.trim()).filter(Boolean);}
+async function createWorkflowOrder(workflowId:string){
+ const q=await db!.query("SELECT id,sequence_no,recipient,purpose,amount::text,currency FROM payment_workflow_steps WHERE workflow_id=$1 AND status='READY' ORDER BY sequence_no LIMIT 1",[workflowId]);
+ if(!q.rowCount){const state=await db!.query("SELECT status FROM payment_workflows WHERE id=$1",[workflowId]);return {complete:state.rows[0]?.status==="COMPLETED",pending:state.rows[0]?.status==="IN_PROGRESS"};}
+ const p=q.rows[0] as {id:string;sequence_no:number;recipient:string;purpose:string;amount:string;currency:string};
+ const claim=await db!.query("UPDATE payment_workflow_steps SET status='CREATING',updated_at=NOW() WHERE id=$1 AND status='READY' RETURNING id",[p.id]);
+ if(!claim.rowCount)return {pending:true};
+ const txId=randomUUID();
+ await db!.query("INSERT INTO payment_transactions(id,raw_prompt,recipient,purpose,amount,currency,status,workflow_id,workflow_step_id) VALUES($1,$2,$3,$4,$5,$6,'CREATING',$7,$8)",[txId,"Approved workflow "+workflowId,p.recipient,p.purpose,p.amount,p.currency,workflowId,p.id]);
+ try{
+  const access=await token();
+  const order=await paypal("/v2/checkout/orders",access,"POST",{intent:"CAPTURE",purchase_units:[{reference_id:txId,description:p.purpose.slice(0,127),amount:{currency_code:p.currency,value:p.amount}}],application_context:{brand_name:"Transactra",user_action:"PAY_NOW",shipping_preference:"NO_SHIPPING"}},txId) as {id?:string;links?:Array<{rel?:string;href?:string}>};
+  const approveUrl=order.links?.find(x=>x.rel==="approve"||x.rel==="payer-action")?.href;
+  if(!order.id||!approveUrl)throw Error("PayPal did not return an order approval link.");
+  await db!.query("UPDATE payment_transactions SET paypal_order_id=$1,status='CREATED',updated_at=NOW() WHERE id=$2",[order.id,txId]);
+  await db!.query("UPDATE payment_workflow_steps SET status='AWAITING_BUYER_APPROVAL',paypal_order_id=$1,approve_url=$2,updated_at=NOW() WHERE id=$3",[order.id,approveUrl,p.id]);
+  await db!.query("UPDATE payment_workflows SET status='IN_PROGRESS',updated_at=NOW() WHERE id=$1",[workflowId]);
+  const total=await db!.query("SELECT step_count FROM payment_workflows WHERE id=$1",[workflowId]);
+  return {workflowId,step:p.sequence_no,totalSteps:Number(total.rows[0].step_count),orderId:order.id,approveUrl,recipient:p.recipient,amount:p.amount,currency:p.currency,purpose:p.purpose};
+ }catch(e){
+  await db!.query("UPDATE payment_workflow_steps SET status='FAILED',updated_at=NOW() WHERE id=$1",[p.id]);
+  await db!.query("UPDATE payment_transactions SET status='FAILED',updated_at=NOW() WHERE id=$1",[txId]);
+  await db!.query("UPDATE payment_workflows SET status='FAILED',updated_at=NOW() WHERE id=$1",[workflowId]);
+  throw e;
+ }
+}
+
 async function route(req:IncomingMessage,res:ServerResponse){
  const url=new URL(req.url||"/","http://"+(req.headers.host||"localhost"));
  try{
   if(req.method==="GET"&&url.pathname==="/api/health")return send(res,200,{status:"ok",database:Boolean(db),paypalConfigured:Boolean(clientId&&secret)});
   if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.PAYPAL_ENV||"sandbox"});
   if(req.method==="POST"&&url.pathname==="/api/parse"){const b=await read(req);return send(res,200,{intent:await parse(String(b.text||""))});}
+  if(req.method==="POST"&&url.pathname==="/api/workflows/plan"){
+   if(!requireOwner(req))return send(res,401,{error:"Owner authentication required."});
+   await ensureWorkflowSchema();const b=await read(req),raw=String(b.text||"").trim();
+   if(!raw||raw.length>4000)return send(res,400,{error:"Provide a workflow instruction under 4,000 characters."});
+   const parts=splitPaymentInstructions(raw);
+   if(parts.length<2||parts.length>8)return send(res,400,{error:"Use 2–8 payment instructions separated by semicolons, new lines, or 'then'."});
+   const intents=[];for(const part of parts)intents.push(await parse(part));
+   const workflowId=randomUUID();await db!.query("INSERT INTO payment_workflows(id,raw_prompt,status,step_count) VALUES($1,$2,'PENDING_APPROVAL',$3)",[workflowId,raw,parts.length]);
+   for(let i=0;i<intents.length;i++){const p=intents[i]!;await db!.query("INSERT INTO payment_workflow_steps(id,workflow_id,sequence_no,recipient,purpose,amount,currency,status) VALUES($1,$2,$3,$4,$5,$6,$7,'PENDING')",[randomUUID(),workflowId,i+1,p.recipient,p.purpose,p.amount,p.currency]);}
+   return send(res,201,{workflowId,status:"PENDING_APPROVAL",steps:intents.map((p,i)=>({sequence:i+1,...p})),totalAmountByCurrency:intents.reduce((a,p)=>{a[p.currency]=(a[p.currency]||0)+Number(p.amount);return a;},{} as Record<string,number>)});
+  }
+  const wm=url.pathname.match(/^\/api\/workflows\/([0-9a-f-]+)(?:\/(approve|reject|next))?$/i);
+  if(wm){
+   if(!requireOwner(req))return send(res,401,{error:"Owner authentication required."});
+   await ensureWorkflowSchema();const id=wm[1]!,action=wm[2]||"",w=await db!.query("SELECT id,status,step_count FROM payment_workflows WHERE id=$1",[id]);
+   if(!w.rowCount)return send(res,404,{error:"Payment workflow not found."});
+   if(req.method==="GET"&&!action){const steps=await db!.query("SELECT sequence_no,recipient,purpose,amount::text,currency,status,paypal_order_id FROM payment_workflow_steps WHERE workflow_id=$1 ORDER BY sequence_no",[id]);return send(res,200,{workflow:w.rows[0],steps:steps.rows});}
+   if(req.method==="POST"&&action==="reject"){if(w.rows[0].status!=="PENDING_APPROVAL")return send(res,409,{error:"Only a pending workflow can be rejected."});await db!.query("UPDATE payment_workflows SET status='REJECTED',updated_at=NOW() WHERE id=$1",[id]);await db!.query("UPDATE payment_workflow_steps SET status='REJECTED',updated_at=NOW() WHERE workflow_id=$1 AND status='PENDING'",[id]);return send(res,200,{status:"REJECTED"});}
+   if(req.method==="POST"&&action==="approve"){const ok=await db!.query("UPDATE payment_workflows SET status='APPROVED',updated_at=NOW() WHERE id=$1 AND status='PENDING_APPROVAL' RETURNING id",[id]);if(!ok.rowCount)return send(res,409,{error:"Workflow is not awaiting approval or was already approved."});await db!.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE workflow_id=$1 AND sequence_no=1 AND status='PENDING'",[id]);return send(res,200,await createWorkflowOrder(id));}
+   if(req.method==="POST"&&action==="next"){if(!["APPROVED","IN_PROGRESS"].includes(String(w.rows[0].status)))return send(res,409,{error:"Workflow is not approved for execution."});return send(res,200,await createWorkflowOrder(id));}
+   return send(res,405,{error:"Method not allowed."});
+  }
+
   if(req.method==="GET"&&url.pathname==="/api/transactions"){await ensureDb();const q=await db!.query("SELECT id,recipient,purpose,amount::text,currency,status,paypal_order_id,created_at FROM payment_transactions ORDER BY created_at DESC LIMIT 50");return send(res,200,{transactions:q.rows});}
   if(req.method==="POST"&&url.pathname==="/api/orders"){
    await ensureDb();const b=await read(req),amount=Number(b.amount),currency=String(b.currency||"USD").toUpperCase(),recipient=String(b.recipient||"").trim(),purpose=String(b.purpose||"Payment").trim();
@@ -45,7 +103,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
    try{const t=await token();const o=await paypal("/v2/checkout/orders",t,"POST",{intent:"CAPTURE",purchase_units:[{reference_id:id,description:purpose.slice(0,127),amount:{currency_code:currency,value:amount.toFixed(2)}}],application_context:{brand_name:"Transactra",user_action:"PAY_NOW",shipping_preference:"NO_SHIPPING"}},id) as {id?:string;status?:string;links?:Array<{rel?:string;href?:string}>};if(!o.id)throw Error("PayPal did not return an order ID.");await db!.query("UPDATE payment_transactions SET paypal_order_id=$1,status='CREATED',updated_at=NOW() WHERE id=$2",[o.id,id]);return send(res,200,{orderId:o.id,status:o.status||"CREATED",approveUrl:o.links?.find(x=>x.rel==="approve"||x.rel==="payer-action")?.href});}catch(e){await db!.query("UPDATE payment_transactions SET status='FAILED',updated_at=NOW() WHERE id=$1",[id]);throw e;}
   }
   const m=url.pathname.match(/^\/api\/orders\/([A-Z0-9]+)\/capture$/i);
-  if(req.method==="POST"&&m){await ensureDb();const id=m[1]!;const old=await db!.query("SELECT status FROM payment_transactions WHERE paypal_order_id=$1",[id]);if(!old.rowCount)return send(res,404,{error:"PayPal order is not associated with Transactra."});if(old.rows[0].status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true});const t=await token();const d=await paypal("/v2/checkout/orders/"+encodeURIComponent(id)+"/capture",t,"POST",{},id+"-capture") as {status?:string;purchase_units?:Array<{payments?:{captures?:Array<{id?:string}>}} >};const status=String(d.status||"UNKNOWN"),captureId=d.purchase_units?.[0]?.payments?.captures?.[0]?.id||null;await db!.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE paypal_order_id=$3",[status,captureId,id]);return send(res,200,{status,captureId});}
+  if(req.method==="POST"&&m){await ensureDb();const id=m[1]!;const old=await db!.query("SELECT status,workflow_id,workflow_step_id FROM payment_transactions WHERE paypal_order_id=$1",[id]);if(!old.rowCount)return send(res,404,{error:"PayPal order is not associated with Transactra."});if(old.rows[0].status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true,workflowId:old.rows[0].workflow_id||undefined});const t=await token();const d=await paypal("/v2/checkout/orders/"+encodeURIComponent(id)+"/capture",t,"POST",{},id+"-capture") as {status?:string;purchase_units?:Array<{payments?:{captures?:Array<{id?:string}>}} >};const status=String(d.status||"UNKNOWN"),captureId=d.purchase_units?.[0]?.payments?.captures?.[0]?.id||null;await db!.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE paypal_order_id=$3",[status,captureId,id]);let workflowId:string|undefined,workflowComplete:boolean|undefined;if(old.rows[0].workflow_id&&old.rows[0].workflow_step_id){workflowId=String(old.rows[0].workflow_id);await db!.query("UPDATE payment_workflow_steps SET status=$1,updated_at=NOW() WHERE id=$2",[status==="COMPLETED"?"COMPLETED":"PAYMENT_"+status,old.rows[0].workflow_step_id]);if(status==="COMPLETED"){const remaining=await db!.query("SELECT id FROM payment_workflow_steps WHERE workflow_id=$1 AND status NOT IN ('COMPLETED','REJECTED') ORDER BY sequence_no LIMIT 1",[workflowId]);if(remaining.rowCount){await db!.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE id=$1 AND status='PENDING'",[remaining.rows[0].id]);}else{await db!.query("UPDATE payment_workflows SET status='COMPLETED',updated_at=NOW() WHERE id=$1",[workflowId]);workflowComplete=true;}}}return send(res,200,{status,captureId,workflowId,workflowComplete});}
   return send(res,404,{error:"Route not found."});
  }catch(e){return send(res,500,{error:e instanceof Error?e.message:"Unexpected server error"});}
 }
