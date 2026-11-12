@@ -116,6 +116,26 @@ async function handleTelegramUpdate(update,env){
 }
 async function api(req,env,url){
  const owner=String(env.TELEGRAM_OWNER_ID||"");
+ const paymentApi=url.pathname==="/api/config"||url.pathname==="/api/transactions"||url.pathname==="/api/parse"||url.pathname==="/api/orders"||url.pathname.startsWith("/api/orders/")||url.pathname.startsWith("/api/auth/paypal/");
+ if(paymentApi){
+  const publicApi=req.method==="GET"&&(url.pathname==="/api/config"||url.pathname==="/api/auth/paypal/start"||url.pathname==="/api/auth/paypal/callback");
+  const user=publicApi?null:await session(req,env);
+  if(!publicApi&&!user)return json({error:"An authenticated Telegram session is required."},401);
+  const secret=String(env.TRANSACTRA_AUTH_HEADER_SECRET||"");
+  const headers=new Headers(req.headers);headers.delete("host");headers.delete("cookie");
+  if(user){
+   if(enc.encode(secret).length<32)return json({error:"Dashboard API authentication is not configured."},503);
+   const timestamp=String(Math.floor(Date.now()/1000));
+   headers.set("x-transactra-user-id",user);
+   headers.set("x-transactra-owner-id",owner);
+   headers.set("x-transactra-auth-timestamp",timestamp);
+   headers.set("x-transactra-auth-signature",hex(await mac(enc.encode(secret),user+"."+timestamp)));
+  }
+  const target="https://transactra-api-production.up.railway.app"+url.pathname+url.search;
+  try{
+   return await fetch(new Request(target,{method:req.method,headers,body:["GET","HEAD"].includes(req.method)?undefined:req.body,redirect:"manual"}));
+  }catch(e){console.error("payment_api_proxy_failed",String(e?.message||e));return json({error:"Transactra payment API is temporarily unavailable."},502);}
+ }
  if(req.method==="GET"&&url.pathname==="/api/config")return json({telegramBotUsername:String(env.TELEGRAM_BOT_USERNAME||"").replace(/^@/,"")});
  const modelApi=url.pathname==="/api/models"||url.pathname==="/api/model-routes";
  if(modelApi){
