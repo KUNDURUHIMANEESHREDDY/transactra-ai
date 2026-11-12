@@ -1,75 +1,36 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
-const DEFAULT_SECRET = "transactra-default-oauth-token-encryption-secret-key-32b";
-
 function getEncryptionKey(customSecret?: string): Buffer {
-  const secret = customSecret ||
-    process.env.TOKEN_ENCRYPTION_SECRET ||
-    process.env.PAYPAL_CLIENT_SECRET ||
-    process.env.BACKEND_SHARED_SECRET ||
-    DEFAULT_SECRET;
-
-  return createHash("sha256").update(secret).digest();
+  const secret = customSecret ?? process.env.TOKEN_ENCRYPTION_SECRET ?? "";
+  if (secret.length < 32) {
+    throw new Error("TOKEN_ENCRYPTION_SECRET must be configured with at least 32 characters.");
+  }
+  return createHash("sha256").update(secret, "utf8").digest();
 }
 
-/**
- * Encrypts a sensitive string (such as an OAuth access or refresh token)
- * using AES-256-GCM authenticated encryption.
- *
- * Format: iv_hex:auth_tag_hex:ciphertext_hex
- */
+/** AES-256-GCM format: iv_hex:auth_tag_hex:ciphertext_hex */
 export function encryptToken(plainText: string, customSecret?: string): string {
   if (!plainText) return "";
-
   const key = getEncryptionKey(customSecret);
-  const iv = randomBytes(12); // Standard 96-bit IV for AES-GCM
+  const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-
-  const encrypted = Buffer.concat([
-    cipher.update(plainText, "utf8"),
-    cipher.final()
-  ]);
-
-  const authTag = cipher.getAuthTag();
-
-  return `${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted.toString("hex")}`;
+  const encrypted = Buffer.concat([cipher.update(plainText, "utf8"), cipher.final()]);
+  return `${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${encrypted.toString("hex")}`;
 }
 
-/**
- * Decrypts a token encrypted with AES-256-GCM.
- * Verifies authenticity with the authentication tag; throws if tampered or invalid.
- */
 export function decryptToken(encryptedText: string, customSecret?: string): string {
   if (!encryptedText) return "";
-
   const parts = encryptedText.split(":");
-  if (parts.length !== 3) {
-    throw new Error("Invalid encrypted token format. Expected iv:authTag:ciphertext");
+  if (parts.length !== 3 || parts.some((part) => !/^(?:[a-f0-9]{2})*$/i.test(part))) {
+    throw new Error("Invalid encrypted token format. Expected hex iv:authTag:ciphertext.");
   }
-
-  const ivHex = parts[0]!;
-  const authTagHex = parts[1]!;
-  const cipherHex = parts[2]!;
-
-  const key = getEncryptionKey(customSecret);
+  const [ivHex, authTagHex, cipherHex] = parts as [string, string, string];
   const iv = Buffer.from(ivHex, "hex");
   const authTag = Buffer.from(authTagHex, "hex");
   const ciphertext = Buffer.from(cipherHex, "hex");
-
-  if (iv.length !== 12) {
-    throw new Error("Invalid IV length for AES-GCM");
-  }
-  if (authTag.length !== 16) {
-    throw new Error("Invalid auth tag length for AES-GCM");
-  }
-
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  if (iv.length !== 12) throw new Error("Invalid IV length for AES-GCM");
+  if (authTag.length !== 16) throw new Error("Invalid auth tag length for AES-GCM");
+  const decipher = createDecipheriv("aes-256-gcm", getEncryptionKey(customSecret), iv);
   decipher.setAuthTag(authTag);
-
-  const decrypted = Buffer.concat([
-    decipher.update(ciphertext),
-    decipher.final()
-  ]);
-
-  return decrypted.toString("utf8");
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
 }

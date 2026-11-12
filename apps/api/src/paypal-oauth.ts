@@ -39,19 +39,33 @@ export type ConnectedAccountSummary = {
   scope: string | null;
 };
 
-export function getPayPalConfig(requestHost?: string): PayPalConfig {
+export function getPayPalConfig(): PayPalConfig {
   const clientId = process.env.PAYPAL_CLIENT_ID || "";
   const clientSecret = process.env.PAYPAL_CLIENT_SECRET || "";
   const isLive = process.env.PAYPAL_ENV === "live";
   const authBase = isLive ? "https://www.paypal.com" : "https://www.sandbox.paypal.com";
   const restBase = isLive ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
 
-  const host = requestHost || process.env.HOST || "127.0.0.1";
-  const port = process.env.PORT || "8787";
-  const defaultBase = host.includes(":") ? `http://${host}` : `http://${host}:${port}`;
-  const apiBase = (process.env.API_BASE_URL || defaultBase).replace(/\/$/, "");
-  const redirectUri = process.env.PAYPAL_REDIRECT_URI || `${apiBase}/api/auth/paypal/callback`;
-  const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+  const isProduction = process.env.NODE_ENV === "production";
+  const defaultBase = `http://127.0.0.1:${process.env.PORT || "8787"}`;
+  const apiBase = (process.env.API_BASE_URL || (isProduction ? "" : defaultBase)).replace(/\/$/, "");
+  const redirectUri = process.env.PAYPAL_REDIRECT_URI || (apiBase ? `${apiBase}/api/auth/paypal/callback` : "");
+  const frontendUrl = (process.env.FRONTEND_URL || (isProduction ? "" : "http://localhost:5173")).replace(/\/$/, "");
+  if (!apiBase || !redirectUri || !frontendUrl) throw new Error("API_BASE_URL, PAYPAL_REDIRECT_URI and FRONTEND_URL must be configured.");
+  const apiRedirect = new URL(redirectUri);
+  const frontendRedirect = new URL(frontendUrl);
+  if (!["http:", "https:"].includes(apiRedirect.protocol) || !["http:", "https:"].includes(frontendRedirect.protocol)) {
+    throw new Error("PayPal OAuth URLs must use HTTP or HTTPS.");
+  }
+  if (isProduction && (apiRedirect.protocol !== "https:" || frontendRedirect.protocol !== "https:")) {
+    throw new Error("PayPal OAuth API and frontend URLs must use HTTPS in production.");
+  }
+  if (apiRedirect.pathname !== "/api/auth/paypal/callback" || apiRedirect.username || apiRedirect.password || apiRedirect.search || apiRedirect.hash) {
+    throw new Error("PAYPAL_REDIRECT_URI must be the canonical PayPal callback URL.");
+  }
+  if (frontendRedirect.username || frontendRedirect.password || frontendRedirect.search || frontendRedirect.hash) {
+    throw new Error("FRONTEND_URL must be a canonical frontend URL without credentials, query, or fragment.");
+  }
 
   return {
     clientId,
@@ -68,7 +82,8 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS paypal_oauth_states (
       state TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL DEFAULT 'default_user',
+      user_id TEXT NOT NULL,
+      session_hash TEXT NOT NULL,
       redirect_url TEXT,
       expires_at TIMESTAMPTZ NOT NULL,
       used_at TIMESTAMPTZ,
@@ -81,7 +96,7 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS paypal_connected_accounts (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id TEXT NOT NULL DEFAULT 'default_user',
+      user_id TEXT NOT NULL,
       paypal_payer_id TEXT NOT NULL,
       email TEXT,
       name TEXT,
@@ -98,6 +113,10 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS paypal_connected_accounts_payer_idx 
       ON paypal_connected_accounts(paypal_payer_id);
+
+    ALTER TABLE paypal_oauth_states ADD COLUMN IF NOT EXISTS session_hash TEXT NOT NULL DEFAULT '';
+    ALTER TABLE paypal_oauth_states ALTER COLUMN user_id DROP DEFAULT;
+    ALTER TABLE paypal_connected_accounts ALTER COLUMN user_id DROP DEFAULT;
   `);
 }
 
@@ -107,11 +126,17 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
  */
 export async function createOAuthState(
   db: Pool,
-  userId = "default_user",
-  customRedirectUrl?: string,
-  requestHost?: string
+  userId: string,
+  sessionHash: string,
+  customRedirectUrl?: string
 ): Promise<{ state: string; authorizeUrl: string }> {
-  const config = getPayPalConfig(requestHost);
+  const config = getPayPalConfig();
+  if (!userId || !sessionHash || !/^[a-f0-9]{64}$/.test(sessionHash)) {
+    throw new Error("Authenticated user and session are required to start PayPal OAuth.");
+  }
+  if (customRedirectUrl && customRedirectUrl !== config.frontendUrl) {
+    throw new Error("OAuth redirect URL is not allowlisted.");
+  }
   if (!config.clientId || !config.clientSecret) {
     throw new Error("PayPal credentials are not configured on the server.");
   }
@@ -121,8 +146,8 @@ export async function createOAuthState(
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
 
   await db.query(
-    "INSERT INTO paypal_oauth_states (state, user_id, redirect_url, expires_at) VALUES ($1, $2, $3, $4)",
-    [state, userId, customRedirectUrl || config.frontendUrl, expiresAt]
+    "INSERT INTO paypal_oauth_states (state, user_id, session_hash, redirect_url, expires_at) VALUES ($1, $2, $3, $4, $5)",
+    [state, userId, sessionHash, config.frontendUrl, expiresAt]
   );
 
   // Request OpenID Connect scopes: openid profile email
@@ -145,16 +170,18 @@ export async function createOAuthState(
  */
 export async function validateAndConsumeState(
   db: Pool,
-  state: string
+  state: string,
+  sessionHash: string,
+  userId: string
 ): Promise<{ valid: boolean; userId?: string | undefined; redirectUrl?: string | undefined; error?: string | undefined }> {
-  if (!state || typeof state !== "string" || state.length < 32) {
+  if (!state || typeof state !== "string" || state.length !== 64 || !/^[a-f0-9]+$/.test(state) || !/^[a-f0-9]{64}$/.test(sessionHash) || !userId) {
     return { valid: false, error: "Invalid or missing OAuth state parameter." };
   }
 
   // Atomic update: only succeeds if state exists, is unused, and not expired
   const result = await db.query<{ user_id: string; redirect_url: string | null }>(
-    "UPDATE paypal_oauth_states SET used_at = NOW() WHERE state = $1 AND used_at IS NULL AND expires_at > NOW() RETURNING user_id, redirect_url",
-    [state]
+    "UPDATE paypal_oauth_states SET used_at = NOW() WHERE state = $1 AND session_hash = $2 AND user_id = $3 AND used_at IS NULL AND expires_at > NOW() RETURNING user_id, redirect_url",
+    [state, sessionHash, userId]
   );
 
   if (!result.rowCount || !result.rows[0]) {
@@ -173,9 +200,8 @@ export async function validateAndConsumeState(
  */
 export async function exchangeAuthorizationCode(
   code: string,
-  requestHost?: string
 ): Promise<PayPalTokenResponse> {
-  const config = getPayPalConfig(requestHost);
+  const config = getPayPalConfig();
   const basicAuth = Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64");
 
   const body = new URLSearchParams({
@@ -206,9 +232,8 @@ export async function exchangeAuthorizationCode(
  */
 export async function fetchPayPalUserInfo(
   accessToken: string,
-  requestHost?: string
 ): Promise<PayPalUserInfo> {
-  const config = getPayPalConfig(requestHost);
+  const config = getPayPalConfig();
 
   const response = await fetch(`${config.restBase}/v1/identity/openidconnect/userinfo?schema=openid`, {
     method: "GET",
@@ -311,8 +336,9 @@ export async function saveConnectedAccount(
  */
 export async function getConnectedAccountStatus(
   db: Pool,
-  userId = "default_user"
+  userId: string
 ): Promise<{ connected: boolean; account: ConnectedAccountSummary | null }> {
+  if (!userId) throw new Error("Authenticated user is required.");
   const result = await db.query<{
     paypal_payer_id: string;
     email: string | null;
@@ -349,8 +375,9 @@ export async function getConnectedAccountStatus(
  */
 export async function disconnectPayPalAccount(
   db: Pool,
-  userId = "default_user"
+  userId: string
 ): Promise<boolean> {
+  if (!userId) throw new Error("Authenticated user is required.");
   const result = await db.query(
     "UPDATE paypal_connected_accounts SET status = 'DISCONNECTED', encrypted_access_token = NULL, encrypted_refresh_token = NULL, updated_at = NOW() WHERE user_id = $1 AND status = 'CONNECTED'",
     [userId]

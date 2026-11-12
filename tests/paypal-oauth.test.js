@@ -1,3 +1,5 @@
+process.env.TOKEN_ENCRYPTION_SECRET ??= "test-only-token-encryption-secret-32-chars";
+
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encryptToken, decryptToken } from "../dist/apps/api/src/token-encryption.js";

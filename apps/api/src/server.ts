@@ -13,6 +13,7 @@ import {
   disconnectPayPalAccount,
   getPayPalConfig
 } from "./paypal-oauth.js";
+import { getAuthenticatedRequestIdentity } from "./request-auth.js";
 const port=Number(process.env.PORT||8787),host=process.env.HOST||"127.0.0.1";
 const clientId=process.env.PAYPAL_CLIENT_ID||"",secret=process.env.PAYPAL_CLIENT_SECRET||"";
 const paypalBase=process.env.PAYPAL_ENV==="live"?"https://api-m.paypal.com":"https://api-m.sandbox.paypal.com";
@@ -98,48 +99,45 @@ async function route(req:IncomingMessage,res:ServerResponse){
 
   // --- PayPal OAuth 2.0 Account Connection ---
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/connect"){
+   const identity=getAuthenticatedRequestIdentity(req);
+   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,503,{error:"Database is required for persistent OAuth connection."});
    await ensurePayPalConnectionSchema(db);
    const redirectUrl=url.searchParams.get("redirect_url")||undefined;
-   const {state,authorizeUrl}=await createOAuthState(db,"default_user",redirectUrl,req.headers.host);
+   const {state,authorizeUrl}=await createOAuthState(db,identity.userId,identity.sessionHash,redirectUrl);
    const wantsJson=url.searchParams.get("format")==="json"||req.headers.accept?.includes("application/json");
    if(wantsJson)return send(res,200,{state,authorizeUrl});
-   res.writeHead(302,{Location:authorizeUrl,"Cache-Control":"no-store"});
+   res.writeHead(302,{Location:authorizeUrl,"Cache-Control":"no-store","Referrer-Policy":"no-referrer"});
    return res.end();
   }
 
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/callback"){
+   const identity=getAuthenticatedRequestIdentity(req);
+   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,503,{error:"Database is required for OAuth callback."});
    await ensurePayPalConnectionSchema(db);
-   const config=getPayPalConfig(req.headers.host);
+   const config=getPayPalConfig();
    const code=url.searchParams.get("code");
    const state=url.searchParams.get("state");
-   const err=url.searchParams.get("error");
-   const errDesc=url.searchParams.get("error_description");
-
-   if(err){
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=${encodeURIComponent(errDesc||err)}`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
+   if(!state){
+     res.writeHead(302,{Location:`${config.frontendUrl}/?paypal_connection=error&reason=missing_state`,"Cache-Control":"no-store"});
      return res.end();
    }
-
-   if(!code||!state){
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=missing_code_or_state`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
-     return res.end();
-   }
-
-   const validation=await validateAndConsumeState(db,state);
+   const validation=await validateAndConsumeState(db,state,identity.sessionHash,identity.userId);
    if(!validation.valid){
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=${encodeURIComponent(validation.error||"invalid_state")}`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
+     res.writeHead(302,{Location:`${config.frontendUrl}/?paypal_connection=error&reason=invalid_state`,"Cache-Control":"no-store"});
      return res.end();
    }
-
+   const providerError=url.searchParams.get("error");
+   if(providerError||!code){
+     const reason=providerError?"authorization_denied":"missing_code";
+     res.writeHead(302,{Location:`${config.frontendUrl}/?paypal_connection=error&reason=${reason}`,"Cache-Control":"no-store"});
+     return res.end();
+   }
    try{
-     const tokenRes=await exchangeAuthorizationCode(code,req.headers.host);
-     const userInfo=await fetchPayPalUserInfo(tokenRes.access_token,req.headers.host);
-     await saveConnectedAccount(db,validation.userId||"default_user",{
+     const tokenRes=await exchangeAuthorizationCode(code);
+     const userInfo=await fetchPayPalUserInfo(tokenRes.access_token);
+     await saveConnectedAccount(db,identity.userId,{
        payerId:userInfo.payerId,
        email:userInfo.email,
        name:userInfo.name,
@@ -149,32 +147,30 @@ async function route(req:IncomingMessage,res:ServerResponse){
        expiresIn:tokenRes.expires_in,
        scope:tokenRes.scope
      });
-
-     const targetBase=validation.redirectUrl||config.frontendUrl;
-     const delimiter=targetBase.includes("?")?"&":"?";
-     const target=`${targetBase}${delimiter}paypal_connection=success`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
+     res.writeHead(302,{Location:`${config.frontendUrl}/?paypal_connection=success`,"Cache-Control":"no-store","Referrer-Policy":"no-referrer"});
      return res.end();
    }catch(e){
-     console.error("PayPal OAuth callback error:",e);
-     const msg=e instanceof Error?e.message:"OAuth exchange failed";
-     const target=`${config.frontendUrl}/?paypal_connection=error&reason=${encodeURIComponent(msg)}`;
-     res.writeHead(302,{Location:target,"Cache-Control":"no-store"});
+     console.error("PayPal OAuth callback failed:",e instanceof Error?e.name:"unknown");
+     res.writeHead(302,{Location:`${config.frontendUrl}/?paypal_connection=error&reason=oauth_exchange_failed`,"Cache-Control":"no-store"});
      return res.end();
    }
   }
 
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/status"){
+   const identity=getAuthenticatedRequestIdentity(req);
+   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,200,{connected:false,account:null,dbConnected:false});
    await ensurePayPalConnectionSchema(db);
-   const status=await getConnectedAccountStatus(db,"default_user");
+   const status=await getConnectedAccountStatus(db,identity.userId);
    return send(res,200,status);
   }
 
   if(req.method==="POST"&&url.pathname==="/api/auth/paypal/disconnect"){
+   const identity=getAuthenticatedRequestIdentity(req);
+   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,503,{error:"Database is required to disconnect account."});
    await ensurePayPalConnectionSchema(db);
-   const disconnected=await disconnectPayPalAccount(db,"default_user");
+   const disconnected=await disconnectPayPalAccount(db,identity.userId);
    return send(res,200,{success:disconnected,message:disconnected?"PayPal account disconnected.":"No active PayPal connection found."});
   }
   if(req.method==="POST"&&url.pathname==="/api/parse"){const b=await read(req);return send(res,200,{intent:await parse(String(b.text||""))});}

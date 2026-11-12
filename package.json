@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start:api": "node --env-file=.env dist/apps/api/src/server.js",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "npm run build:api && node --test tests/payment.test.js tests/paypal-oauth.test.js"
+    "test": "npm run build:api && node --test tests/payment.test.js tests/paypal-oauth.test.js tests/paypal-oauth-security.test.js"
   },
   "dependencies": {
     "pg": "^8.13.1",
