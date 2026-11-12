@@ -68,7 +68,7 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS paypal_oauth_states (
       state TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL DEFAULT 'default_user',
+      user_id TEXT NOT NULL,
       redirect_url TEXT,
       expires_at TIMESTAMPTZ NOT NULL,
       used_at TIMESTAMPTZ,
@@ -81,7 +81,7 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS paypal_connected_accounts (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id TEXT NOT NULL DEFAULT 'default_user',
+      user_id TEXT NOT NULL,
       paypal_payer_id TEXT NOT NULL,
       email TEXT,
       name TEXT,
@@ -98,19 +98,17 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS paypal_connected_accounts_payer_idx 
       ON paypal_connected_accounts(paypal_payer_id);
-  `);
-}
-
-/**
- * Creates a cryptographically random OAuth state token, saves it with a 10-minute expiry,
+  , saves it with a 10-minute expiry,
  * and builds the official PayPal authorization URL.
  */
 export async function createOAuthState(
   db: Pool,
-  userId = "default_user",
-  customRedirectUrl?: string,
+  userId: string,
   requestHost?: string
 ): Promise<{ state: string; authorizeUrl: string }> {
+  if (!/^\d{1,20}$/.test(userId)) {
+    throw new Error("A valid Telegram user ID is required to connect PayPal.");
+  }
   const config = getPayPalConfig(requestHost);
   if (!config.clientId || !config.clientSecret) {
     throw new Error("PayPal credentials are not configured on the server.");
@@ -121,8 +119,8 @@ export async function createOAuthState(
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
 
   await db.query(
-    "INSERT INTO paypal_oauth_states (state, user_id, redirect_url, expires_at) VALUES ($1, $2, $3, $4)",
-    [state, userId, customRedirectUrl || config.frontendUrl, expiresAt]
+    "INSERT INTO paypal_oauth_states (state, user_id, expires_at) VALUES ($1, $2, $3)",
+    [state, userId, expiresAt]
   );
 
   // Request OpenID Connect scopes: openid profile email
@@ -146,7 +144,7 @@ export async function createOAuthState(
 export async function validateAndConsumeState(
   db: Pool,
   state: string
-): Promise<{ valid: boolean; userId?: string | undefined; redirectUrl?: string | undefined; error?: string | undefined }> {
+): Promise<{ valid: boolean; userId?: string | undefined; error?: string | undefined }> {
   if (!state || typeof state !== "string" || state.length < 32) {
     return { valid: false, error: "Invalid or missing OAuth state parameter." };
   }
@@ -164,7 +162,6 @@ export async function validateAndConsumeState(
   return {
     valid: true,
     userId: result.rows[0].user_id,
-    redirectUrl: result.rows[0].redirect_url || undefined,
   };
 }
 
@@ -311,7 +308,7 @@ export async function saveConnectedAccount(
  */
 export async function getConnectedAccountStatus(
   db: Pool,
-  userId = "default_user"
+  userId: string
 ): Promise<{ connected: boolean; account: ConnectedAccountSummary | null }> {
   const result = await db.query<{
     paypal_payer_id: string;
@@ -349,7 +346,7 @@ export async function getConnectedAccountStatus(
  */
 export async function disconnectPayPalAccount(
   db: Pool,
-  userId = "default_user"
+  userId: string
 ): Promise<boolean> {
   const result = await db.query(
     "UPDATE paypal_connected_accounts SET status = 'DISCONNECTED', encrypted_access_token = NULL, encrypted_refresh_token = NULL, updated_at = NOW() WHERE user_id = $1 AND status = 'CONNECTED'",
