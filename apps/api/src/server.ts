@@ -553,7 +553,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
     if(tx.status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true,workflowId:tx.workflow_id||undefined});
     const account=await getConnectedAccountStatus(db!,userId);
     if(!account.connected||!account.account?.verified)return send(res,403,{error:"A verified PayPal account must remain connected to capture this payment."});
-    const claim=await db!.query("UPDATE payment_transactions SET status='CAPTURING',updated_at=NOW() WHERE id=$1 AND status IN ('CREATED','CAPTURE_PENDING') RETURNING id",[tx.id]);
+    const claim=await db!.query("UPDATE payment_transactions SET status='CAPTURING',capture_started_at=NOW(),updated_at=NOW() WHERE id=$1 AND (status IN ('CREATED','CAPTURE_PENDING') OR (status='CAPTURING' AND COALESCE(capture_started_at,updated_at)<NOW()-INTERVAL '2 minutes')) RETURNING id",[tx.id]);
     if(!claim.rowCount)return send(res,409,{error:"This order is already being captured or is not eligible for capture."});
     try{
      const order=await getPayPalOrder(orderId);
@@ -564,7 +564,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
      if(!orderCheck.allowed){
       const reason=orderCheck.reason,completedOrder=order.status==="COMPLETED";
       const audit=await db!.connect();
-      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status=$1,updated_at=NOW() WHERE id=$2",[completedOrder?"CAPTURE_PENDING":"DENIED",tx.id]);await appendFinancialAudit(audit,{userId,eventType:completedOrder?"PAYMENT_CAPTURE_RECOVERY_REVIEW":"PAYMENT_CAPTURE",allowed:false,reason:completedOrder?"PayPal reports a completed order but capture verification needs manual review: "+reason:reason,policyVersion:FINANCIAL_POLICY_VERSION,risk:"high",riskScore:100,payloadHash:paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose})});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
+      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status=$1,capture_started_at=NULL,updated_at=NOW() WHERE id=$2",[completedOrder?"CAPTURE_PENDING":"DENIED",tx.id]);await appendFinancialAudit(audit,{userId,eventType:completedOrder?"PAYMENT_CAPTURE_RECOVERY_REVIEW":"PAYMENT_CAPTURE",allowed:false,reason:completedOrder?"PayPal reports a completed order but capture verification needs manual review: "+reason:reason,policyVersion:FINANCIAL_POLICY_VERSION,risk:"high",riskScore:100,payloadHash:paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose})});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
       return send(res,completedOrder?202:403,completedOrder?{status:"CAPTURE_PENDING",manualReviewRequired:true,error:reason}:{error:reason});
      }
      const limits=await loadUserFinancialLimits(db!,userId),hash=paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose});
@@ -576,7 +576,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
      if(!decision.allowed||(decision.requiresStepUp&&!stepUpConfirmed)){
       const reason=decision.allowed?"Policy now requires an additional high-value confirmation; capture is blocked.":decision.reason;
       const audit=await db!.connect();
-      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status='DENIED',updated_at=NOW() WHERE id=$1",[tx.id]);await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:false,reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
+      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status='DENIED',capture_started_at=NULL,updated_at=NOW() WHERE id=$1",[tx.id]);await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:false,reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
       return send(res,409,{error:reason});
      }
      const recovered=order.status==="COMPLETED",captured=recovered?order:await capturePayPalOrder(orderId,tx.id+"-capture");
@@ -584,7 +584,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
      const audit=await db!.connect();let workflowComplete:boolean|undefined;
      try{
       await audit.query("BEGIN");
-      await audit.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE id=$3",[completed?"COMPLETED":"CAPTURE_PENDING",captureId,tx.id]);
+      await audit.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,capture_started_at=NULL,updated_at=NOW() WHERE id=$3",[completed?"COMPLETED":"CAPTURE_PENDING",captureId,tx.id]);
       await appendFinancialAudit(audit,{userId,eventType:recovered?"PAYMENT_CAPTURE_RECOVERED":"PAYMENT_CAPTURE",allowed:completed,reason:recovered?"Recovered a previously completed PayPal capture after an interrupted API response.":completed?"PayPal confirmed the capture.":"PayPal capture is pending or incomplete.",policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
       if(tx.workflow_id&&tx.workflow_step_id){
        await audit.query("UPDATE payment_workflow_steps SET status=$1,updated_at=NOW() WHERE id=$2",[completed?"COMPLETED":"PAYMENT_PENDING",tx.workflow_step_id]);
@@ -597,7 +597,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
       await audit.query("COMMIT");
      }catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
      return send(res,completed?200:202,{status:completed?"COMPLETED":"CAPTURE_PENDING",captureId,recovered:recovered||undefined,workflowId:tx.workflow_id||undefined,workflowComplete});
-    }catch(e){await db!.query("UPDATE payment_transactions SET status='CREATED',updated_at=NOW() WHERE id=$1 AND status='CAPTURING'",[tx.id]);throw e;}
+    }catch(e){await db!.query("UPDATE payment_transactions SET status='CAPTURE_PENDING',capture_started_at=NULL,updated_at=NOW() WHERE id=$1 AND status='CAPTURING'",[tx.id]);throw e;}
    }
    return send(res,404,{error:"Route not found."});
  }catch(e){return send(res,500,{error:e instanceof Error?e.message:"Unexpected server error"});}
