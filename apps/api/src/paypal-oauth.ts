@@ -51,7 +51,12 @@ export function getPayPalConfig(requestHost?: string): PayPalConfig {
   const defaultBase = host.includes(":") ? `http://${host}` : `http://${host}:${port}`;
   const apiBase = (process.env.API_BASE_URL || defaultBase).replace(/\/$/, "");
   const redirectUri = process.env.PAYPAL_REDIRECT_URI || `${apiBase}/api/auth/paypal/callback`;
-  const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+  const frontend = new URL(process.env.FRONTEND_URL || "http://localhost:5173");
+  const localFrontend = frontend.hostname === "localhost" || frontend.hostname === "127.0.0.1";
+  if (frontend.protocol !== "https:" && !(localFrontend && frontend.protocol === "http:")) {
+    throw new Error("FRONTEND_URL must use HTTPS (HTTP is allowed only for localhost development).");
+  }
+  const frontendUrl = frontend.origin;
 
   return {
     clientId,
@@ -74,11 +79,8 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
       used_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
-
-    CREATE INDEX IF NOT EXISTS paypal_oauth_states_expiry_idx 
-      ON paypal_oauth_states(expires_at) 
-      WHERE used_at IS NULL;
-
+    CREATE INDEX IF NOT EXISTS paypal_oauth_states_expiry_idx
+      ON paypal_oauth_states(expires_at) WHERE used_at IS NULL;
     CREATE TABLE IF NOT EXISTS paypal_connected_accounts (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id TEXT NOT NULL,
@@ -95,10 +97,15 @@ export async function ensurePayPalConnectionSchema(db: Pool): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE(user_id)
     );
-
-    CREATE INDEX IF NOT EXISTS paypal_connected_accounts_payer_idx 
+    CREATE INDEX IF NOT EXISTS paypal_connected_accounts_payer_idx
       ON paypal_connected_accounts(paypal_payer_id);
-  , saves it with a 10-minute expiry,
+  `);
+  await db.query("ALTER TABLE paypal_oauth_states ALTER COLUMN user_id DROP DEFAULT");
+  await db.query("ALTER TABLE paypal_connected_accounts ALTER COLUMN user_id DROP DEFAULT");
+}
+
+/**
+ * Creates a cryptographically random OAuth state token, stores the Telegram identity,
  * and builds the official PayPal authorization URL.
  */
 export async function createOAuthState(
@@ -150,8 +157,8 @@ export async function validateAndConsumeState(
   }
 
   // Atomic update: only succeeds if state exists, is unused, and not expired
-  const result = await db.query<{ user_id: string; redirect_url: string | null }>(
-    "UPDATE paypal_oauth_states SET used_at = NOW() WHERE state = $1 AND used_at IS NULL AND expires_at > NOW() RETURNING user_id, redirect_url",
+  const result = await db.query<{ user_id: string }>(
+    "UPDATE paypal_oauth_states SET used_at = NOW() WHERE state = $1 AND used_at IS NULL AND expires_at > NOW() RETURNING user_id",
     [state]
   );
 
