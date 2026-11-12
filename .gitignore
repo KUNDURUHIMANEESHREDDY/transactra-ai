@@ -10,3 +10,6 @@ coverage/
 .idea/
 .tmp/
 .cache/
+
+.wrangler/
+infra/dashboard/.telegram-webhook-secret

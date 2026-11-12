@@ -1,0 +1,29 @@
+name = "transactra-telegram"
+main = "index.mjs"
+compatibility_date = "2026-11-12"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "transactra-staging"
+database_id = "e7292f55-c90e-4d34-8b77-c97c3e5ec15a"
+
+[vars]
+TELEGRAM_BOT_USERNAME = "@TransactraBot"
+TELEGRAM_OWNER_ID = "8593447241"
+DASHBOARD_URL = "https://transactra-dashboard.pages.dev"
+
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1.0
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1.0
+persist = true
