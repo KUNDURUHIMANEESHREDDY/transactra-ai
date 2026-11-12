@@ -43,6 +43,7 @@ NVIDIA_NIM_FALLBACK_MODELS = ""
 NVIDIA_NIM_ZERO_COST_LIMIT_INR = "0"
 NVIDIA_NIM_EXECUTION_ENABLED = "true"
 NVIDIA_NIM_TIMEOUT_MS = "120000"
+CLOUDPILOT_INFERENCE_URL = "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions"
 
 [ai]
 binding = "AI"
