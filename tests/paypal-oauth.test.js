@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encryptToken, decryptToken } from "../dist/apps/api/src/token-encryption.js";
-import { getPayPalConfig } from "../dist/apps/api/src/paypal-oauth.js";
+import { getPayPalConfig, createOAuthState } from "../dist/apps/api/src/paypal-oauth.js";
+
+process.env.TOKEN_ENCRYPTION_SECRET ||= "test-only-secret-that-is-at-least-32-bytes";
 
 test("Token Encryption: AES-256-GCM roundtrip encryption and decryption", () => {
   const secretToken = "A21AAI_MOCK_PAYPAL_ACCESS_TOKEN_XYZ1234567890";
@@ -128,4 +130,30 @@ test("Security Sanitization: Connected account summary never leaks tokens or cli
   assert.equal("encrypted_refresh_token" in publicSummary.account, false);
   assert.equal("client_secret" in publicSummary.account, false);
   assert.equal("password" in publicSummary.account, false);
+});
+
+
+test("Token Encryption: refuses to use an implicit or fallback secret", () => {
+  const previous = process.env.TOKEN_ENCRYPTION_SECRET;
+  delete process.env.TOKEN_ENCRYPTION_SECRET;
+  try {
+    assert.throws(() => encryptToken("token"), /TOKEN_ENCRYPTION_SECRET must be configured/);
+  } finally {
+    if (previous === undefined) delete process.env.TOKEN_ENCRYPTION_SECRET;
+    else process.env.TOKEN_ENCRYPTION_SECRET = previous;
+  }
+});
+
+test("OAuth State: binds authorization URL to the initiating Telegram user", async () => {
+  process.env.PAYPAL_CLIENT_ID = "test_client_id";
+  process.env.PAYPAL_CLIENT_SECRET = "test_client_secret";
+  let inserted;
+  const fakeDb = { query: async (sql, values) => { inserted = { sql, values }; return { rowCount: 1, rows: [] }; } };
+  const result = await createOAuthState(fakeDb, "123456789");
+  assert.equal(inserted.values[1], "123456789");
+  assert.match(inserted.sql, /user_id/);
+  assert.match(result.authorizeUrl, /^https:\/\/www\.sandbox\.paypal\.com\/signin\/authorize\?/);
+  assert.ok(new URL(result.authorizeUrl).searchParams.get("state"));
+  assert.equal(new URL(result.authorizeUrl).searchParams.has("redirect_url"), false);
+  await assert.rejects(() => createOAuthState(fakeDb, "default_user"), /valid Telegram user ID/);
 });
