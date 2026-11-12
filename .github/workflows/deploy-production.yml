@@ -59,7 +59,7 @@ jobs:
           foreach ($required in @(
             'name\s*=\s*"transactra-edge"',
             'database_name\s*=\s*"transactra"',
-            'database_id\s*=\s*"35047d34-b8f4-4a2a-9321-fb5b5e48e409"',
+            'database_id\s*=\s*"faf1f8b5-e029-4598-9fb0-c3cb1106d311"',
             'TRANSACTRA_ENV\s*=\s*"production"',
             'TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED\s*=\s*"true"',
             'NVIDIA_NIM_PLANNING_ENABLED\s*=\s*"true"',
@@ -118,7 +118,7 @@ jobs:
           $config = Get-Content "infra/cloudflare/wrangler.toml" -Raw
           if ($config -notmatch 'name\s*=\s*"transactra-edge"' -or
               $config -notmatch 'database_name\s*=\s*"transactra"' -or
-              $config -notmatch 'database_id\s*=\s*"35047d34-b8f4-4a2a-9321-fb5b5e48e409"' -or
+              $config -notmatch 'database_id\s*=\s*"faf1f8b5-e029-4598-9fb0-c3cb1106d311"' -or
               $config -notmatch 'TRANSACTRA_ENV\s*=\s*"production"') {
             throw "Production resource identity check failed."
           }
