@@ -70,7 +70,7 @@ async function handleMessage(message:any) {
     return;
   }
   if (text==="/help") {
-    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2ΓÇô8 step plan separated by semicolons, new lines, or ΓÇ£thenΓÇ¥. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/ai <message> - chat with CloudPilot AI\n/connect - securely connect your PayPal account\n/dashboard - open your live operations console\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
+    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2ΓÇô8 step plan separated by semicolons, new lines, or ΓÇ£thenΓÇ¥. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/ai <message> - chat with CloudPilot AI\n/connect - securely connect your PayPal account\n/dashboard - open your live operations console\n/history - recent transactions\n/summary - captured payment totals\n/cancel - learn how to revoke a pending approval\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
     return;
   }
   if (text==="/cancel") {
