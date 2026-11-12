@@ -339,7 +339,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
       return send(res, 400, { error: "Invalid or expired PayPal authorization launch." });
     const sessionHash = hashOAuthSession(session);
     const launch = await db.query(
-      "UPDATE paypal_oauth_states SET launch_used_at=NOW() WHERE state=$1 AND session_hash=$2 AND launch_used_at IS NULL AND used_at IS NULL AND expires_at>NOW() RETURNING state",
+      "UPDATE paypal_oauth_states SET launch_used_at=COALESCE(launch_used_at,NOW()) WHERE state=$1 AND session_hash=$2 AND used_at IS NULL AND expires_at>NOW() RETURNING state",
       [state, sessionHash]
     );
     if (!launch.rowCount) return send(res, 410, { error: "This PayPal authorization link is expired or has already been used. Start again in Telegram." });
