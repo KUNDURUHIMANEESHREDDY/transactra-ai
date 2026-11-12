@@ -1,5 +1,4 @@
-﻿import { randomUUID } from "node:crypto";
-
+﻿
 const token = process.env.TELEGRAM_BOT_TOKEN || "";
 const ownerId = process.env.TELEGRAM_OWNER_ID || "";
 const backendSharedSecret = process.env.BACKEND_SHARED_SECRET || "";
