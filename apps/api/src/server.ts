@@ -317,7 +317,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
    try{await processTelegramUpdate(update);processedTelegramUpdates.add(updateId);if(processedTelegramUpdates.size>2000)processedTelegramUpdates.delete(processedTelegramUpdates.values().next().value!);return send(res,200,{ok:true});}
    catch(e){console.error("Telegram webhook processing failed:",e instanceof Error?e.message:"unknown error");return send(res,500,{error:"Telegram update processing failed."});}
   }
-  if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.PAYPAL_ENV||"sandbox",telegramBotUsername:process.env.TELEGRAM_BOT_USERNAME||""});
+  if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.NODE_ENV==="production"||process.env.PAYPAL_ENV==="live"?"live":"sandbox",telegramBotUsername:process.env.TELEGRAM_BOT_USERNAME||""});
 
   // Telegram authenticates the owner; the browser receives a one-time launch ticket.
   if (req.method === "GET" && url.pathname === "/api/auth/paypal/connect") {
