@@ -9,6 +9,7 @@ const cloudflareDir = resolve(here, "..");
 const migrationsDir = resolve(cloudflareDir, "migrations");
 const staging = readFileSync(resolve(cloudflareDir, "wrangler.staging.toml"), "utf8");
 const production = readFileSync(resolve(cloudflareDir, "wrangler.toml"), "utf8");
+const dashboardWorker = readFileSync(resolve(cloudflareDir, "../dashboard/wrangler.toml"), "utf8");
 const deployWorkflow = readFileSync(resolve(cloudflareDir, "../../.github/workflows/deploy-staging.yml"), "utf8");
 
 function scalar(config, key) {
@@ -27,6 +28,8 @@ test("staging Worker is isolated from production D1 and queues", () => {
   assert.equal(scalar(staging, "TRANSACTRA_ENV"), "staging");
   assert.equal(scalar(staging, "TRANSACTRA_PLANNER_MODE"), "d1-native");
   assert.equal(scalar(staging, "TRANSACTRA_D1_DATABASE_ID"), "312d97f4-47b4-4084-84d5-21c5fe9c5538");
+  assert.match(staging, /\[\[services\]\]\s*binding = "TELEGRAM_GATEWAY"\s*service = "transactra-telegram"/);
+  assert.match(dashboardWorker, /\[\[services\]\]\s*binding = "ORCHESTRATOR"\s*service = "transactra-edge-staging"/);
   assert.equal(scalar(staging, "TRANSACTRA_STAGING_BASE_URL"), "https://transactra-edge-staging.himaneeshreddyk.workers.dev");
   assert.equal(scalar(staging, "TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED"), "false");
   assert.equal(scalar(staging, "NVIDIA_NIM_PLANNING_ENABLED"), "false");

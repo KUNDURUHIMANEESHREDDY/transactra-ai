@@ -3,9 +3,8 @@ main = "src/index.mjs"
 compatibility_date = "2026-11-09"
 workers_dev = true
 
-# Isolated execution for bounded agent code; no outbound network.
-[[worker_loaders]]
-binding = "LOADER"
+# Dynamic Worker sandbox is not bound on the Free staging plan.
+# sandbox_verify fails closed until a compatible paid-plan binding is provisioned.
 
 # STAGING ONLY. Never copy the production D1 ID or queue names here.
 # Cloudflare Free status is owner-attested (2026-11-09); billing is not independently API-verified.
@@ -15,6 +14,10 @@ binding = "DB"
 database_name = "transactra-staging"
 database_id = "312d97f4-47b4-4084-84d5-21c5fe9c5538"
 migrations_dir = "migrations"
+
+[[services]]
+binding = "TELEGRAM_GATEWAY"
+service = "transactra-telegram"
 
 [[queues.producers]]
 binding = "EVENTS"

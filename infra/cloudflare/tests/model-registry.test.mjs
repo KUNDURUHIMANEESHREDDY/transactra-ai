@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 import { completeRegisteredModel, hasRegisteredTaskModel, MODEL_REGISTRY_LIMITS } from "../src/model-registry.mjs";
 import { createOrchestratorPlan } from "../src/orchestrator.mjs";
+import { makeReply } from "../src/index.mjs";
+import { isAgentExecutionEnabledForTask } from "../src/agent-runtime.mjs";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
@@ -24,6 +26,7 @@ function dbFor(route, providers) {
       let values = [];
       const statement = {
         bind(...args) { values = args; return statement; },
+        async all() { return { results: [] }; },
         async first() {
           if (sql.includes("SELECT p.id FROM task_model_routes")) return route?.model_provider_id ? { id: route.model_provider_id } : null;
           if (sql.includes("SELECT model_provider_id,fallback_provider_id")) return route;
@@ -116,4 +119,50 @@ test("orchestrator planning uses the model assigned to orchestration in D1", asy
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("Telegram general chat uses its selected D1 model even while CloudPilot is locked", async () => {
+  const encrypted = await encrypt("test-provider-api-key");
+  const provider = { id: "model-1", name: "Test", provider: "openai-compatible", base_url: "https://api.openai.com/v1", model_id: "gpt-test", encrypted_api_key: encrypted, max_output_tokens: 512 };
+  const db = dbFor({ model_provider_id: provider.id, fallback_provider_id: null }, { [provider.id]: provider });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    model: "gpt-test",
+    choices: [{ message: { content: "GENERAL_ROUTE_OK" } }],
+    usage: { prompt_tokens: 9, completion_tokens: 3 }
+  }), { status: 200 });
+  try {
+    const reply = await makeReply({
+      update_id: 901,
+      message: { text: "Hello Transactra", from: { id: Number(owner) }, chat: { id: Number(owner), type: "private" } }
+    }, {
+      DB: db,
+      TELEGRAM_OWNER_ID: owner,
+      MODEL_REGISTRY_ENCRYPTION_KEY: secret,
+      NVIDIA_NIM_EXECUTION_ENABLED: "false",
+      TRANSACTRA_AGENT_EXECUTION_ENABLED: "false"
+    });
+    assert.equal(reply, "GENERAL_ROUTE_OK");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("registered task model can authorize reasoning only behind the agent execution master switch", async () => {
+  const db = dbFor({ model_provider_id: "model-1", fallback_provider_id: null }, {});
+  assert.equal(await isAgentExecutionEnabledForTask({
+    TELEGRAM_OWNER_ID: owner,
+    TRANSACTRA_AGENT_EXECUTION_ENABLED: "false",
+    NVIDIA_NIM_EXECUTION_ENABLED: "false"
+  }, db, "coding"), false);
+  assert.equal(await isAgentExecutionEnabledForTask({
+    TELEGRAM_OWNER_ID: owner,
+    TRANSACTRA_AGENT_EXECUTION_ENABLED: "true",
+    NVIDIA_NIM_EXECUTION_ENABLED: "false"
+  }, db, "coding"), true);
+  assert.equal(await isAgentExecutionEnabledForTask({
+    TELEGRAM_OWNER_ID: owner,
+    TRANSACTRA_AGENT_EXECUTION_ENABLED: "true",
+    NVIDIA_NIM_EXECUTION_ENABLED: "false"
+  }, dbFor(null, {}), "coding"), false);
 });

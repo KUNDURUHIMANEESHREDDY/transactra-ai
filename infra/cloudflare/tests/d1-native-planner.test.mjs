@@ -111,3 +111,20 @@ test("owner Telegram payment commands preserve policy approval and PayPal buyer 
  assert.equal(requests[2].url,"https://api.transactra.example/api/orders/ORDER1234567890/capture");
  assert.equal(requests[2].options.method,"POST");
 });
+
+test("staging orchestrator uses the Telegram service binding for replies without copying the bot token",async()=>{
+ const {db}=nativeDb(),item=queued("/task Prepare a staging release checklist",91),requests=[];
+ const bridge="staging-telegram-bridge-secret-with-more-than-32-bytes";
+ const gateway={async fetch(request){requests.push(request);return new Response(JSON.stringify({ok:true,result:{message_id:91}}),{status:200,headers:{"content-type":"application/json"}});}};
+ const stagingEnv=env(db,[],{TELEGRAM_BOT_TOKEN:undefined,TELEGRAM_WEBHOOK_SECRET:undefined,TELEGRAM_GATEWAY:gateway,TRANSACTRA_TELEGRAM_BRIDGE_SECRET:bridge});
+ const ready=await worker.fetch(new Request("https://edge.test/ready"),stagingEnv);
+ assert.equal(ready.status,200,"D1 readiness must accept the authenticated Telegram gateway binding");
+ await worker.queue({messages:[item.message]},stagingEnv);
+ assert.equal(item.acknowledged(),true);
+ assert.equal(requests.length,1);
+ assert.equal(new URL(requests[0].url).pathname,"/internal/telegram/send");
+ assert.equal(requests[0].headers.get("x-transactra-bridge-secret"),bridge);
+ const payload=await requests[0].json();
+ assert.equal(payload.chat_id,OWNER);
+ assert.match(payload.text,/Task saved by the D1-native planner/);
+});

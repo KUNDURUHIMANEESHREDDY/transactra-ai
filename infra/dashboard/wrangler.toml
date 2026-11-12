@@ -8,6 +8,10 @@ binding = "DB"
 database_name = "transactra-staging"
 database_id = "312d97f4-47b4-4084-84d5-21c5fe9c5538"
 
+[[services]]
+binding = "ORCHESTRATOR"
+service = "transactra-edge-staging"
+
 [vars]
 TELEGRAM_BOT_USERNAME = "@TransactraBot"
 TELEGRAM_OWNER_ID = "8593447241"

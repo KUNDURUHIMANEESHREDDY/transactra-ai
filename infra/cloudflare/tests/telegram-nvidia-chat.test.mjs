@@ -61,7 +61,7 @@ test("ordinary Telegram messages fail closed until zero-cost NVIDIA entitlement 
     NVIDIA_NIM_MODEL: "test-model"
   });
 
-  assert.match(reply, /CloudPilot inference is paused by its endpoint, service, entitlement, or execution gate/);
+  assert.match(reply, /no authorized chat model is available/);
   assert.match(reply, /No model request was sent/);
 });
 

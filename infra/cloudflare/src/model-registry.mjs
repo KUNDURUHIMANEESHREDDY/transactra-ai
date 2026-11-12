@@ -37,6 +37,16 @@ export async function hasRegisteredTaskModel(db, ownerId, taskType) {
   return Boolean(row?.id);
 }
 
+export async function hasAnyRegisteredTaskModel(db, ownerId) {
+  if (!db?.prepare || !ownerId) return false;
+  const row = await db.prepare(`
+    SELECT p.id FROM task_model_routes r
+    JOIN model_providers p ON p.id=r.model_provider_id
+    WHERE r.owner_id=? AND p.owner_id=? AND p.enabled=1 LIMIT 1
+  `).bind(String(ownerId), String(ownerId)).first();
+  return Boolean(row?.id);
+}
+
 async function loadProvider(db, ownerId, id) {
   if (!id) return null;
   return db.prepare("SELECT id,name,provider,base_url,model_id,encrypted_api_key,max_output_tokens FROM model_providers WHERE id=? AND owner_id=? AND enabled=1")

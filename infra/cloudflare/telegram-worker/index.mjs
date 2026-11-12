@@ -51,6 +51,17 @@ async function sendText(env,m,text){
  if(Number.isInteger(m.message_id))payload.reply_parameters={message_id:m.message_id,allow_sending_without_reply:true};
  await tg(env,"sendMessage",payload);
 }
+async function forwardTelegramUpdate(update,env){
+ const secret=String(env.TRANSACTRA_TELEGRAM_BRIDGE_SECRET||"");
+ if(secret.length<32||typeof env.ORCHESTRATOR?.fetch!=="function")return false;
+ const response=await env.ORCHESTRATOR.fetch(new Request("https://transactra-edge-staging.internal/internal/telegram/update",{
+  method:"POST",headers:{"content-type":"application/json","x-transactra-bridge-secret":secret},
+  body:JSON.stringify(update),redirect:"error",signal:AbortSignal.timeout(10000)
+ }));
+ const data=await response.json().catch(()=>null);
+ if(!response.ok||data?.ok!==true)throw Error("orchestrator_forward_failed");
+ return true;
+}
 async function sendPayPalConnect(env,m){
  const apiBase="https://transactra-api-production.up.railway.app";
  const secret=String(env.TRANSACTRA_AUTH_HEADER_SECRET||"");
@@ -95,6 +106,10 @@ async function handleTelegramUpdate(update,env){
   }
 
  }
+ if(typeof env.ORCHESTRATOR?.fetch==="function"&&String(env.TRANSACTRA_TELEGRAM_BRIDGE_SECRET||"").length>=32){
+  try{await forwardTelegramUpdate(update,env);return;}
+  catch(e){console.error("telegram_orchestrator_forward_failed",String(e?.message||e));await sendText(env,m,"Transactra's task service is temporarily unavailable. Your request was not executed; please retry shortly.");return;}
+ }
  if(text.startsWith("/")){await sendText(env,m,"That command is not available. Send /help, or simply describe what you want in a normal message.");return;}
  try{await sendText(env,m,await callCloudPilot(env,text));}
  catch(e){console.error("cloudpilot_telegram_error",String(e?.message||e));await sendText(env,m,"CloudPilot is temporarily unavailable. Your request was not executed. Please try again shortly.");}
@@ -138,6 +153,7 @@ async function api(req,env,url){
     let b;try{b=await req.json();}catch{return json({error:"Invalid JSON body."},400);}
     const types=["general","research","coding","planning","analysis","financial","orchestration"];
     if(!types.includes(b?.taskType))return json({error:"Unsupported task category."},400);
+    if(b?.modelId&&b?.fallbackModelId&&String(b.modelId)===String(b.fallbackModelId))return json({error:"Primary and fallback models must be different."},400);
     for(const id of [b?.modelId,b?.fallbackModelId].filter(Boolean)){
      const found=await env.DB.prepare("SELECT id FROM model_providers WHERE id=? AND owner_id=? AND enabled=1").bind(String(id),owner).first();
      if(!found)return json({error:"Selected model is unavailable or disabled."},400);
@@ -172,6 +188,18 @@ export default {async scheduled(controller,env){try{const webhook="https://trans
  const url=new URL(req.url);
  if(req.method==="GET"&&url.pathname==="/health")return json({ok:true,service:"transactra-telegram",telegramConfigured:Boolean(env.TELEGRAM_BOT_TOKEN&&env.TELEGRAM_WEBHOOK_SECRET),cloudPilotConfigured:Boolean(env.CLOUDPILOT_INFERENCE_SECRET),database:Boolean(env.DB),model:MODEL});
  if(url.pathname.startsWith("/api/"))return api(req,env,url);
+ if(req.method==="POST"&&url.pathname==="/internal/telegram/send"){
+  const bridgeSecret=String(env.TRANSACTRA_TELEGRAM_BRIDGE_SECRET||"");
+  if(bridgeSecret.length<32||!eq(req.headers.get("x-transactra-bridge-secret")||"",bridgeSecret))return json({error:"unauthorized"},401);
+  let payload;try{payload=await req.json();}catch{return json({error:"invalid_json"},400);}
+  const chatId=String(payload?.chat_id??""),message=String(payload?.text??"");
+  if(!/^-?\d{1,20}$/.test(chatId)||!message.trim()||message.length>4096)return json({error:"invalid_message"},400);
+  const outgoing={chat_id:chatId,text:message,disable_web_page_preview:true};
+  if(Number.isInteger(payload.message_thread_id)&&payload.message_thread_id>0)outgoing.message_thread_id=payload.message_thread_id;
+  if(typeof payload.business_connection_id==="string"&&payload.business_connection_id.length<=256)outgoing.business_connection_id=payload.business_connection_id;
+  try{return json({ok:true,result:await tg(env,"sendMessage",outgoing)});}
+  catch(e){console.error("telegram_bridge_send_failed",String(e?.message||e));return json({error:"telegram_send_failed"},502);}
+ }
  if(req.method==="POST"&&url.pathname==="/telegram/webhook"){
   const supplied=req.headers.get("x-telegram-bot-api-secret-token")||"";
   if(!env.TELEGRAM_WEBHOOK_SECRET||!eq(supplied,env.TELEGRAM_WEBHOOK_SECRET))return json({error:"unauthorized"},401);

@@ -1,5 +1,6 @@
 import { evaluateOrchestratorStep, replanOrchestratorFailure, validateApprovedExecutionPlan, requiresOwnerStepApproval } from "./orchestrator.mjs";
 import { runAgentWorker, isAgentExecutionEnabled } from "./agent-runtime.mjs";
+import { hasAnyRegisteredTaskModel } from "./model-registry.mjs";
 import { buildToolAction, hashToolAction } from "./tool-adapters.mjs";
 import { buildFinalReport } from "./final-report.mjs";
 
@@ -149,7 +150,8 @@ async function ensureStepApproval(env, job, step, ownerId, now) {
 export async function processD1NativeApprovedJobs(env, scheduledTime, now) {
   const ownerId = typeof env.TELEGRAM_OWNER_ID === "string" ? env.TELEGRAM_OWNER_ID.trim() : "";
   if (!ownerId) return { dispatched: 0, reason: "owner_identity_unavailable" };
-  if (!isAgentExecutionEnabled(env)) return { dispatched: 0, reason: "agent_execution_disabled" };
+  if (env.TRANSACTRA_AGENT_EXECUTION_ENABLED !== "true") return { dispatched: 0, reason: "agent_execution_disabled" };
+  if (!isAgentExecutionEnabled(env) && !(await hasAnyRegisteredTaskModel(env.DB,ownerId))) return { dispatched: 0, reason: "agent_execution_disabled" };
   const due = await env.DB.prepare(`
     SELECT j.id,j.task_id,t.description,p.plan_json
     FROM orchestrator_jobs j

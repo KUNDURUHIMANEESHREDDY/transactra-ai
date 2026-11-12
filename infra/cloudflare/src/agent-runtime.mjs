@@ -1,6 +1,6 @@
 import { isNvidiaNimConfigured } from "./nvidia-nim.mjs";
 import { completeCloudPilot, isCloudPilotConfigured } from "./cloudpilot.mjs";
-import { completeRegisteredModel } from "./model-registry.mjs";
+import { completeRegisteredModel, hasRegisteredTaskModel } from "./model-registry.mjs";
 import { buildToolAction, executeToolAdapter, hashToolAction, isSideEffectStep } from "./tool-adapters.mjs";
 import { isAgentToolAllowed } from "./orchestrator.mjs";
 
@@ -19,6 +19,13 @@ export function isAgentExecutionEnabled(env) {
     && env.NVIDIA_NIM_EXECUTION_ENABLED === "true"
     && isNvidiaNimConfigured(env)
     && isCloudPilotConfigured(env);
+}
+
+export async function isAgentExecutionEnabledForTask(env, db, taskType) {
+  if (env.TRANSACTRA_AGENT_EXECUTION_ENABLED !== "true") return false;
+  const ownerId=String(env.TELEGRAM_OWNER_ID||"");
+  if (await hasRegisteredTaskModel(db,ownerId,taskType)) return true;
+  return isAgentExecutionEnabled(env);
 }
 
 /**
@@ -54,8 +61,15 @@ export async function runAgentWorker(env, step, context = {}) {
     }
   }
 
-  if (!isAgentExecutionEnabled(env)) {
-    return { status: "blocked", error: "Agent execution is disabled or NVIDIA NIM credentials/free entitlement are not valid." };
+  const taskType=context.taskType||({researcher:"research",analyst:"analysis",builder:"coding",operator:"general",verifier:"analysis"}[step.agent]||"general");
+  const customModelEnabled=await hasRegisteredTaskModel(context.db,String(env.TELEGRAM_OWNER_ID||""),taskType);
+  const executionAllowed=sideEffect
+    ? isAgentExecutionEnabled(env)
+    : customModelEnabled
+      ? env.TRANSACTRA_AGENT_EXECUTION_ENABLED==="true"
+      : isAgentExecutionEnabled(env);
+  if (!executionAllowed) {
+    return { status: "blocked", error: "Agent execution is disabled or the selected inference provider is not authorized." };
   }
 
   const adapterContext = {
@@ -140,8 +154,9 @@ export async function runAgentWorker(env, step, context = {}) {
       maxOutputTokens: 500,
       estimatedCostInr: 0,
     };
-    const taskType=context.taskType||({researcher:"research",analyst:"analysis",builder:"coding",operator:"general",verifier:"analysis"}[step.agent]||"general");
-    const completion=await completeRegisteredModel(env,context.db,request,taskType)||await completeCloudPilot(env,request);
+    const completion=customModelEnabled
+      ? await completeRegisteredModel(env,context.db,request,taskType)
+      : await completeCloudPilot(env,request);
     return {
       status: "completed",
       result: completion.output.slice(0, 3000),
