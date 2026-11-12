@@ -32,16 +32,45 @@ function rules(text:string):Intent{
  const purpose=text.match(/\bfor\s+(.+?)(?:[.!?]|$)/i)?.[1]?.trim()||"Payment";
  return {amount:n.toFixed(2),currency,recipient,purpose:purpose.slice(0,120),confidence:.82,source:"rules"};
 }
+type ChatMessage={role:"system"|"user";content:string};
+async function cloudPilotCompletion(messages:ChatMessage[],maxTokens=384):Promise<string>{
+ const configuredUrl=process.env.CLOUDPILOT_INFERENCE_URL||"";
+ const sharedSecret=process.env.CLOUDPILOT_INFERENCE_SECRET||"";
+ if(!configuredUrl)throw Error("CloudPilot inference URL is not configured.");
+ if(Buffer.byteLength(sharedSecret,"utf8")<32)throw Error("CloudPilot inference secret is not configured with at least 32 bytes.");
+ let endpoint:URL;
+ try{endpoint=new URL(configuredUrl.endsWith("/chat/completions")?configuredUrl:configuredUrl.replace(/\/$/,"")+"/chat/completions");}
+ catch{throw Error("CloudPilot inference URL is invalid.");}
+ if(endpoint.protocol!=="https:")throw Error("CloudPilot inference requires HTTPS.");
+ const model=process.env.AI_MODEL||"stepfun-ai/step-5-preview";
+ const response=await fetch(endpoint,{method:"POST",headers:{Authorization:"Bearer "+sharedSecret,"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({model,messages,max_tokens:maxTokens,temperature:0.2}),redirect:"error",signal:AbortSignal.timeout(125000)});
+ if(!response.ok)throw Error("CloudPilot inference returned HTTP "+response.status+".");
+ const data=await response.json() as {model?:string;choices?:Array<{message?:{content?:string}}>} ;
+ const reply=data.choices?.[0]?.message?.content;
+ if(typeof reply!=="string"||!reply.trim())throw Error("CloudPilot returned an empty or invalid completion.");
+ if(data.model&&data.model!==model)throw Error("CloudPilot returned an unexpected model identifier.");
+ return reply.trim();
+}
+function modelIntent(raw:string):Intent{
+ let p:Record<string,unknown>;
+ try{p=JSON.parse(raw) as Record<string,unknown>;}catch{throw Error("CloudPilot could not return valid payment details. Please restate the amount and recipient.");}
+ const amount=Number(p.amount),currency=String(p.currency||"USD").toUpperCase(),recipient=String(p.recipient||"").trim();
+ if(!Number.isFinite(amount)||amount<=0||amount>1000000||!currencies.has(currency)||!recipient||recipient.length>80)throw Error("CloudPilot did not identify a valid amount, currency and recipient. Please clarify the payment request.");
+ return {amount:amount.toFixed(2),currency,recipient,purpose:String(p.purpose||"Payment").slice(0,120),confidence:.97,source:"model"};
+}
 async function parse(text:string):Promise<Intent>{
  if(!text.trim()||text.length>1000)throw Error("Enter a payment request under 1,000 characters.");
  const cloudPilotUrl=process.env.CLOUDPILOT_INFERENCE_URL;
- const cloudPilotSecret=process.env.CLOUDPILOT_INFERENCE_SECRET;
- const base=cloudPilotUrl||process.env.AI_BASE_URL,key=cloudPilotUrl?cloudPilotSecret:process.env.AI_API_KEY,model=process.env.AI_MODEL;
+ if(cloudPilotUrl){
+  const raw=await cloudPilotCompletion([{role:"system",content:"Extract payment amount, currency, recipient and purpose as JSON. Never infer a missing amount or recipient. If either is missing, return an empty string for that field. Return only valid JSON."},{role:"user",content:text}],384);
+  return modelIntent(raw);
+ }
+ const base=process.env.AI_BASE_URL,key=process.env.AI_API_KEY,model=process.env.AI_MODEL;
  if(base&&key&&model)try{
   const endpoint=base.replace(/\/$/,"")+(base.endsWith("/chat/completions")?"":"/chat/completions");
   const r=await fetch(endpoint,{method:"POST",headers:{Authorization:"Bearer "+key,"Content-Type":"application/json"},body:JSON.stringify({model,temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:"Extract payment amount, currency, recipient and purpose as JSON. Never infer missing amount or recipient. Return only valid JSON."},{role:"user",content:text}]}),signal:AbortSignal.timeout(12000)});
-  if(r.ok){const data=await r.json() as {choices?:Array<{message?:{content?:string}}>};const p=JSON.parse(data.choices?.[0]?.message?.content||"{}") as Record<string,unknown>;const amount=Number(p.amount),currency=String(p.currency||"USD").toUpperCase(),recipient=String(p.recipient||"").trim();if(Number.isFinite(amount)&&amount>0&&amount<=1000000&&currencies.has(currency)&&recipient)return {amount:amount.toFixed(2),currency,recipient:recipient.slice(0,80),purpose:String(p.purpose||"Payment").slice(0,120),confidence:.97,source:"model"};}
- }catch{/* no-key deterministic fallback */}
+  if(r.ok){const data=await r.json() as {choices?:Array<{message?:{content?:string}}>};return modelIntent(data.choices?.[0]?.message?.content||"{}");}
+ }catch{/* legacy provider remains optional; use the deterministic parser when unavailable */}
  return rules(text);
 }
 async function ensureDb(){if(!db)throw Error("DATABASE_URL is required. Start PostgreSQL with docker compose and configure .env.");await db.query("CREATE TABLE IF NOT EXISTS payment_transactions(id UUID PRIMARY KEY,raw_prompt TEXT NOT NULL,recipient TEXT NOT NULL,purpose TEXT NOT NULL,amount NUMERIC(18,2) NOT NULL CHECK(amount>0),currency CHAR(3) NOT NULL,status TEXT NOT NULL,paypal_order_id TEXT UNIQUE,paypal_capture_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");}
@@ -174,6 +203,13 @@ async function route(req:IncomingMessage,res:ServerResponse){
    return send(res,200,{success:disconnected,message:disconnected?"PayPal account disconnected.":"No active PayPal connection found."});
   }
   if(req.method==="POST"&&url.pathname==="/api/parse"){const b=await read(req);return send(res,200,{intent:await parse(String(b.text||""))});}
+  if(req.method==="POST"&&url.pathname==="/api/ai/chat"){
+   if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram owner session required."});
+   const b=await read(req),prompt=String(b.text||"").trim();
+   if(!prompt||prompt.length>1000)return send(res,400,{error:"Send a message between 1 and 1,000 characters."});
+   const reply=await cloudPilotCompletion([{role:"system",content:"You are Transactra's informational assistant, powered by CloudPilot. Answer clearly and briefly. You may explain payment workflows and help prepare payment instructions, but you cannot authorize, create, approve, capture, or execute payments. Never claim an action was completed. Never ask for passwords, one-time codes, API keys, or payment credentials."},{role:"user",content:prompt}],384);
+   return send(res,200,{reply,model:process.env.AI_MODEL||"stepfun-ai/step-5-preview"});
+  }
   if(req.method==="POST"&&url.pathname==="/api/workflows/plan"){
    if(!requireOwner(req))return send(res,401,{error:"Owner authentication required."});
    await ensureWorkflowSchema();const b=await read(req),raw=String(b.text||"").trim();
