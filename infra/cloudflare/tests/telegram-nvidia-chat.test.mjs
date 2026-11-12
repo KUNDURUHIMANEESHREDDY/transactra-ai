@@ -61,7 +61,7 @@ test("ordinary Telegram messages fail closed until zero-cost NVIDIA entitlement 
     NVIDIA_NIM_MODEL: "test-model"
   });
 
-  assert.match(reply, /chat is paused by its service, entitlement, or execution gate/);
+  assert.match(reply, /CloudPilot inference is paused by its endpoint, service, entitlement, or execution gate/);
   assert.match(reply, /No model request was sent/);
 });
 
@@ -171,14 +171,14 @@ test("owner-only model command toggles runtime control without sending inference
       update_id: 201,
       message: { text: "/nvidia on", from: { id: 12345 }, chat: { id: 12345, type: "private" } }
     }, env);
-    assert.match(onReply, /service is ON/);
+    assert.match(onReply, /CloudPilot inference is ON/);
     assert.equal(enabled, 1);
 
     const offReply = await makeReply({
       update_id: 202,
       message: { text: "/nvidia off", from: { id: 12345 }, chat: { id: 12345, type: "private" } }
     }, env);
-    assert.match(offReply, /service is OFF/);
+    assert.match(offReply, /CloudPilot inference is OFF/);
     assert.equal(enabled, 0);
 
     const unauthorized = await makeReply({

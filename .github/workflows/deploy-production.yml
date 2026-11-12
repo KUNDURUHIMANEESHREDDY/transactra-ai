@@ -1,6 +1,9 @@
 name: Transactra Production Deploy
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       confirm_production:
@@ -18,7 +21,7 @@ concurrency:
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/main' && inputs.confirm_production == 'DEPLOY'
+    if: github.ref == 'refs/heads/main' && ((github.event_name == 'workflow_dispatch' && inputs.confirm_production == 'DEPLOY') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy-production]')))
     runs-on: [self-hosted, Windows, X64, transactra]
     timeout-minutes: 40
     defaults:
@@ -74,7 +77,7 @@ jobs:
 
   deploy-production:
     needs: verify
-    if: github.ref == 'refs/heads/main' && inputs.confirm_production == 'DEPLOY'
+    if: github.ref == 'refs/heads/main' && ((github.event_name == 'workflow_dispatch' && inputs.confirm_production == 'DEPLOY') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy-production]')))
     runs-on: [self-hosted, Windows, X64, transactra]
     environment:
       name: transactra-production
@@ -104,6 +107,8 @@ jobs:
       - name: Require explicit production credentials and resource identity
         env:
           CLOUDFLARE_WORKERS_DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_DEPLOY_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) {
             throw "Add CLOUDFLARE_API_TOKEN with D1 migration permissions to the protected transactra-production environment."
@@ -111,6 +116,17 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_WORKERS_DEPLOY_TOKEN)) {
             throw "Add CLOUDFLARE_WORKERS_DEPLOY_TOKEN to the protected transactra-production environment. This is a separate secret from CLOUDFLARE_API_TOKEN and must use a Cloudflare API token with Account > Workers Scripts > Edit permission, scoped to the Transactra production account."
           }
+          if ([string]::IsNullOrWhiteSpace($env:TELEGRAM_BOT_TOKEN) -or [string]::IsNullOrWhiteSpace($env:TELEGRAM_WEBHOOK_SECRET)) {
+            throw "Add TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET to the protected transactra-production GitHub environment. The deploy stops before D1 migrations when either is missing."
+          }
+          if ($env:TELEGRAM_WEBHOOK_SECRET -notmatch '^[A-Za-z0-9_-]{1,256}$') {
+            throw "TELEGRAM_WEBHOOK_SECRET must use Telegram's allowed 1-256 character format."
+          }
+          $botCheck = Invoke-RestMethod -Uri "https://api.telegram.org/bot$($env:TELEGRAM_BOT_TOKEN)/getMe" -Method Get -TimeoutSec 20
+          if ($botCheck.ok -ne $true -or -not $botCheck.result.id) {
+            throw "TELEGRAM_BOT_TOKEN failed Telegram Bot API getMe validation."
+          }
+          Write-Host "Telegram bot token validated; credential value remains masked."
           $uri = [Uri]$env:CLOUDFLARE_PRODUCTION_BASE_URL
           if ($uri.Scheme -ne "https" -or $uri.Host -notmatch "workers\.dev$") {
             throw "Production URL must be HTTPS on workers.dev."
@@ -172,7 +188,50 @@ jobs:
           pnpm dlx wrangler@4.159.0 versions deploy "$($env:TRANSACTRA_VERSION_ID)@100%" --name transactra-edge --yes --config infra/cloudflare/wrangler.toml
           if ($LASTEXITCODE -ne 0) { throw "Production Worker version deployment failed." }
 
+      - name: Install Telegram and CloudPilot shared secrets
+        env:
+          CLOUDFLARE_WORKERS_DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_DEPLOY_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          $accountId = "e15f135fd5ae49e30f892777aebec675"
+          $headers = @{ Authorization = "Bearer $env:CLOUDFLARE_WORKERS_DEPLOY_TOKEN" }
+          $bytes = New-Object byte[] 48
+          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+          try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+          $sharedSecret = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+          function Set-WorkerSecret([string]$scriptName,[string]$secretName,[string]$secretValue) {
+            $body = @{ name = $secretName; type = "secret_text"; text = $secretValue } | ConvertTo-Json -Compress
+            $response = Invoke-RestMethod -Method Put -Uri "https://api.cloudflare.com/client/v4/accounts/$accountId/workers/scripts/$scriptName/secrets" -Headers $headers -ContentType "application/json" -Body $body -TimeoutSec 30
+            if ($response.success -ne $true) { throw "Cloudflare rejected secret installation for $scriptName/$secretName." }
+          }
+          Set-WorkerSecret "cloudpilot-edge" "TRANSACTRA_INFERENCE_SECRET" $sharedSecret
+          Set-WorkerSecret "transactra-edge" "CLOUDPILOT_INFERENCE_SECRET" $sharedSecret
+          Set-WorkerSecret "transactra-edge" "TELEGRAM_BOT_TOKEN" $env:TELEGRAM_BOT_TOKEN
+          Set-WorkerSecret "transactra-edge" "TELEGRAM_WEBHOOK_SECRET" $env:TELEGRAM_WEBHOOK_SECRET
+          Write-Host "Installed the shared inference secret and Telegram secrets; values were not emitted."
+
+      - name: Register Transactra Telegram webhook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          CLOUDFLARE_PRODUCTION_BASE_URL: https://transactra-edge.himaneeshreddyk.workers.dev
+        run: |
+          $webhookUrl = $env:CLOUDFLARE_PRODUCTION_BASE_URL.TrimEnd('/') + "/telegram/webhook"
+          $payload = @{
+            url = $webhookUrl
+            secret_token = $env:TELEGRAM_WEBHOOK_SECRET
+            allowed_updates = @("message","callback_query","business_message","business_connection")
+          } | ConvertTo-Json -Depth 5 -Compress
+          $registered = Invoke-RestMethod -Uri "https://api.telegram.org/bot$($env:TELEGRAM_BOT_TOKEN)/setWebhook" -Method Post -ContentType "application/json" -Body $payload -TimeoutSec 25
+          if ($registered.ok -ne $true -or $registered.result -ne $true) {
+            throw "Telegram rejected the Transactra production webhook registration."
+          }
+          Write-Host "Transactra Telegram webhook registered."
+
       - name: Verify production health and readiness
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           $base = $env:CLOUDFLARE_PRODUCTION_BASE_URL.TrimEnd('/')
           $health = Invoke-RestMethod -Uri "$base/health" -Method Get -TimeoutSec 25
@@ -180,4 +239,8 @@ jobs:
           $ready = Invoke-RestMethod -Uri "$base/ready" -Method Get -TimeoutSec 25
           if ($ready.ok -ne $true -or $ready.ready -ne $true) {
             throw "Production readiness failed after deployment. Invoke the documented rollback procedure."
+          }
+          $webhook = Invoke-RestMethod -Uri "https://api.telegram.org/bot$($env:TELEGRAM_BOT_TOKEN)/getWebhookInfo" -Method Get -TimeoutSec 20
+          if ($webhook.ok -ne $true -or $webhook.result.url -ne "$base/telegram/webhook") {
+            throw "Telegram webhook does not point to the deployed Transactra production Worker."
           }

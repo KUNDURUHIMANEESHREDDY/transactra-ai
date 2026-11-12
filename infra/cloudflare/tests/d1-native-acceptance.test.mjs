@@ -233,6 +233,8 @@ test("status distinguishes stale Telegram ingress from configured NVIDIA plannin
     env.NVIDIA_NIM_FREE_TIER_VERIFIED_AT = new Date().toISOString();
     env.NVIDIA_NIM_API_KEY = "test-key";
     env.NVIDIA_NIM_MODEL = "test-model";
+    env.CLOUDPILOT_INFERENCE_URL = "https://cloudpilot-edge.himaneeshreddyk.workers.dev/chat/completions";
+    env.CLOUDPILOT_INFERENCE_SECRET = "test-shared-secret-that-is-at-least-32-bytes";
     env.NVIDIA_NIM_EXECUTION_ENABLED = "false";
     env.TRANSACTRA_AGENT_EXECUTION_ENABLED = "false";
     const item = queueMessage("/status", 710);
@@ -247,7 +249,7 @@ test("status distinguishes stale Telegram ingress from configured NVIDIA plannin
     }
     assert.equal(item.acknowledged(), true);
     assert.match(sent[0].text, /Webhook: stale/);
-    assert.match(sent[0].text, /NVIDIA planning: configured; live inference not yet proven/);
+    assert.match(sent[0].text, /CloudPilot inference: configured; live inference not yet proven/);
     assert.match(sent[0].text, /Agent execution: LOCKED/);
   } finally {
     close();

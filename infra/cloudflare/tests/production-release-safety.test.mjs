@@ -41,3 +41,26 @@ test("production Worker upload permission is verified before D1 migrations and t
   assert.match(release, /\$uploadExitCode = \$LASTEXITCODE/);
   assert.match(release, /wrangler@4\.159\.0 versions deploy "\$\(\$env:TRANSACTRA_VERSION_ID\)@100%"/);
 });
+
+test("production deployment requires a valid Telegram bot before D1 migrations", () => {
+  const credentials = release.indexOf("Require explicit production credentials and resource identity");
+  const migration = release.indexOf("Apply reviewed migrations to production D1");
+  assert.ok(credentials >= 0 && migration > credentials);
+  assert.match(release, /TELEGRAM_BOT_TOKEN/);
+  assert.match(release, /TELEGRAM_WEBHOOK_SECRET/);
+  assert.match(release, /getMe/);
+  assert.match(release, /setWebhook/);
+});
+
+test("production deployment provisions the same high-entropy CloudPilot secret on both Workers", () => {
+  assert.match(release, /RandomNumberGenerator/);
+  assert.match(release, /Set-WorkerSecret "cloudpilot-edge" "TRANSACTRA_INFERENCE_SECRET"/);
+  assert.match(release, /Set-WorkerSecret "transactra-edge" "CLOUDPILOT_INFERENCE_SECRET"/);
+  assert.match(release, /Installed the shared inference secret and Telegram secrets; values were not emitted/);
+});
+
+test("production deploy can run only by explicit manual confirmation or a marked main commit", () => {
+  assert.match(release, /push:\s*branches:\s*- main/);
+  assert.match(release, /inputs\.confirm_production == 'DEPLOY'/);
+  assert.match(release, /contains\(github\.event\.head_commit\.message, '\[deploy-production\]'\)/);
+});

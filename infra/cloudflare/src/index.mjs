@@ -208,7 +208,7 @@ export async function makeReply(update,env){
  const m=telegramMessage(update);if(!m||typeof m.text!=="string")return null;
  if(!m.from||String(m.from.id)!==String(env.TELEGRAM_OWNER_ID)||m.chat?.type!=="private")return null;
  const text=m.text.trim(), command=(text.split(/\s+/,1)[0]||"").split("@")[0].toLowerCase();
- if(command==="/start"||command==="/help")return "Transactra control\n\n/status — service and event-ingestion readiness\n/nvidia on|off|status — owner-only model service control\n/cloudpilot status|test — inspect or test the CloudPilot connection\n/provider — inference provider configuration\n/innovate — evaluate or propose next 48-hour project candidate (>= 90/100 threshold)\n/task <description> — submit a task for owner approval\n/remember <key> <value> — save durable agent memory\n/memory — list memory and quota usage\n/memory-status — inspect quota and compaction state\n/forget <key> — delete saved memory\n/orchestrator — inspect job and recovery state\n/tasks — list recent tasks\n/task-status <task-id> — inspect a task\n/approvals — list pending task approvals\n/approve <approval-id> <reason> — approve task execution\n/reject <approval-id> <reason> — reject task execution\n/step-approvals — list pending per-step approvals\n/step-approval <approval-id> — inspect the exact approved action\n/approve-step <approval-id> <hash-prefix> <reason> — approve one exact step action\n/reject-step <approval-id> <hash-prefix> <reason> — reject one exact step action\n/help — show commands\n\nNVIDIA NIM is the intended inference provider. NVIDIA service defaults OFF. Private development access uses NVIDIA Developer Program free endpoints; INR 0 dispatch policy, NIM-only fallback, and owner approval remain enforced."+(isD1NativePlanner(env)?"\n\nPlanner: Cloudflare D1-native; task plans and approvals are stored locally. Approval does not start execution.":"\n\nPlanner: legacy authenticated bridge.");
+ if(command==="/start"||command==="/help")return "Transactra control\n\n/status — service and event-ingestion readiness\n/nvidia on|off|status — owner-only model service control\n/cloudpilot status|test — inspect or test the CloudPilot connection\n/provider — inference provider configuration\n/innovate — evaluate or propose next 48-hour project candidate (>= 90/100 threshold)\n/task <description> — submit a task for owner approval\n/remember <key> <value> — save durable agent memory\n/memory — list memory and quota usage\n/memory-status — inspect quota and compaction state\n/forget <key> — delete saved memory\n/orchestrator — inspect job and recovery state\n/tasks — list recent tasks\n/task-status <task-id> — inspect a task\n/approvals — list pending task approvals\n/approve <approval-id> <reason> — approve task execution\n/reject <approval-id> <reason> — reject task execution\n/step-approvals — list pending per-step approvals\n/step-approval <approval-id> — inspect the exact approved action\n/approve-step <approval-id> <hash-prefix> <reason> — approve one exact step action\n/reject-step <approval-id> <hash-prefix> <reason> — reject one exact step action\n/help — show commands\n\nCloudPilot Edge is Transactra's inference gateway to NVIDIA NIM. Model execution defaults OFF; CloudPilot enforces the INR 0 policy and quota. Task execution and payment actions remain subject to separate owner approvals."+(isD1NativePlanner(env)?"\n\nPlanner: Cloudflare D1-native; task plans and approvals are stored locally. Approval does not start execution.":"\n\nPlanner: legacy authenticated bridge.");
  const normalizedText=text.toLowerCase().replace(/[.!?]+$/,"").replace(/\s+/g," ");
  let nvidiaAction=null;
  if(command==="/nvidia"){
@@ -220,22 +220,19 @@ export async function makeReply(update,env){
  else if(/^(?:what is )?(?:the )?nvidia(?: nim)? status$/.test(normalizedText)) nvidiaAction="status";
  if(nvidiaAction==="off"){
   await setNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID,false);
-  return "NVIDIA NIM service is OFF. New inference requests are blocked immediately; entitlement and quota records are unchanged.";
+  return "CloudPilot inference is OFF. New Transactra model requests are blocked immediately; CloudPilot quota records are unchanged.";
  }
  if(nvidiaAction==="on"){
   if(!isNvidiaNimDeveloperAccessConfirmed(env)||!cloudPilotConfig(env).ok)return "CloudPilot remains OFF. Developer Program access or the authenticated CloudPilot inference endpoint/shared secret is missing or expired. No inference request was sent.";
-  if(env.NVIDIA_NIM_EXECUTION_ENABLED!=="true"&&env.NVIDIA_NIM_PLANNING_ENABLED!=="true")return "NVIDIA NIM remains OFF because both planning and execution feature flags are disabled.";
+  if(env.NVIDIA_NIM_EXECUTION_ENABLED!=="true"&&env.NVIDIA_NIM_PLANNING_ENABLED!=="true")return "CloudPilot remains OFF because both planning and execution feature flags are disabled.";
   await setNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID,true);
-  return "NVIDIA NIM service is ON for private development. Endpoint: https://integrate.api.nvidia.com. One retry on HTTP 429; model failover only after explicit 404/410 or repeated 429 rejection. Ambiguous failures are never replayed. Paid/external providers remain disabled; task approval gates remain enforced. No test inference was sent.";
+  return "CloudPilot inference is ON for Transactra. Model requests route through the authenticated CloudPilot Edge endpoint; CloudPilot owns NVIDIA quota settlement and zero-cost enforcement. Payment and task approvals remain separate. No test inference was sent.";
  }
  if(nvidiaAction==="status"){
   const enabled=await getNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID);
-  const keyPresent=typeof env.NVIDIA_NIM_API_KEY==="string"&&env.NVIDIA_NIM_API_KEY.trim().length>0;
-  const modelPresent=typeof env.NVIDIA_NIM_MODEL==="string"&&env.NVIDIA_NIM_MODEL.trim().length>0;
+  const config=cloudPilotConfig(env);
   const entitlement=isNvidiaNimDeveloperAccessConfirmed(env);
-  const day=new Date().toISOString().slice(0,10);
-  const quota=await env.DB.prepare("SELECT SUM(requests_reserved) AS requests_reserved,SUM(requests_used) AS requests_used,SUM(tokens_reserved) AS tokens_reserved,SUM(tokens_used) AS tokens_used,MAX(status) AS status FROM inference_quota_daily WHERE quota_date=? AND provider LIKE 'nvidia-nim:%'").bind(day).first();
-  return "NVIDIA NIM private development status\nService: "+(enabled?"ON":"OFF (default; fail-closed)")+"\nEndpoint: https://integrate.api.nvidia.com\nAPI key secret: "+(keyPresent?"present (value protected)":"missing")+"\nModel: "+(modelPresent?"configured":"missing")+"\nDeveloper access review: "+(entitlement?"current":"missing or expired")+"\nDaily requests: Unlimited (provider/account governed)"+ "\nDaily reserved/used tokens: Usage tracked; no Transactra daily token cap (provider/account governed)"+"\nDaily spending ceiling: INR 0 (paid dispatch blocked; provider terms still apply)"+"\nQuota status: "+(quota?.status||"not yet initialized")+"\nNIM fallback models: "+(env.NVIDIA_NIM_FALLBACK_MODELS||"none configured")+"\nAutomatic retry: one retry on HTTP 429 only\nNIM model failover: HTTP 404/410 or repeated 429 only\nAmbiguous failures: no replay; reservation retained\nPaid/external fallback: none\nOwner approval: required for task execution. No inference was sent by this status command.";
+  return "CloudPilot inference status\nService: "+(enabled?"ON":"OFF (default; fail-closed)")+"\nEndpoint: "+(config.ok?"configured and allowlisted":"not configured ("+config.reason+")")+"\nShared secret: "+(config.ok?"present (value protected)":"missing or invalid")+"\nModel: "+String(env.NVIDIA_NIM_MODEL||"stepfun-ai/step-5-preview")+"\nDeveloper access review: "+(entitlement?"current":"missing or expired")+"\nZero-cost policy: INR 0; enforced by CloudPilot\nQuota settlement: owned by CloudPilot\nOwner approval: required for task execution. No inference was sent by this status command.";
  }
 
  if(command==="/cloudpilot"){
@@ -458,12 +455,12 @@ export async function makeReply(update,env){
   const ageMs=Number.isFinite(lastUpdate)?Math.max(0,Date.now()-lastUpdate):Infinity;
   const ageLabel=Number.isFinite(ageMs)?(ageMs<3600000?Math.floor(ageMs/60000)+" minutes ago":Math.floor(ageMs/3600000)+" hours ago"):"never";
   const webhookState=ageMs<=30*60*1000?"receiving updates":"stale; last update "+ageLabel;
-  const nimPlanningReady=env.TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED==="true"&&env.NVIDIA_NIM_PLANNING_ENABLED==="true"&&isNvidiaNimDeveloperAccessConfirmed(env)&&typeof env.NVIDIA_NIM_API_KEY==="string"&&Boolean(env.NVIDIA_NIM_API_KEY.trim())&&typeof env.NVIDIA_NIM_MODEL==="string"&&Boolean(env.NVIDIA_NIM_MODEL.trim());
-  const executionReady=env.TRANSACTRA_AGENT_EXECUTION_ENABLED==="true"&&env.NVIDIA_NIM_EXECUTION_ENABLED==="true"&&isNvidiaNimDeveloperAccessConfirmed(env);
+  const nimPlanningReady=env.TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED==="true"&&env.NVIDIA_NIM_PLANNING_ENABLED==="true"&&isNvidiaNimDeveloperAccessConfirmed(env)&&cloudPilotConfig(env).ok;
+  const executionReady=env.TRANSACTRA_AGENT_EXECUTION_ENABLED==="true"&&env.NVIDIA_NIM_EXECUTION_ENABLED==="true"&&isNvidiaNimDeveloperAccessConfirmed(env)&&cloudPilotConfig(env).ok;
   const plannerLabel=isD1NativePlanner(env)?"D1-native; local approvals":(pipelineReady?"legacy bridge configured; live readiness not yet verified":"legacy bridge blocked");
-  return "Transactra status\n\nWebhook: "+webhookState+"\nD1 event store: connected\nTelegram updates stored: "+(events?.total??0)+"\nLatest update: "+(events?.latest??"none")+(heartbeat?.scheduled_at?"\nScheduler heartbeat: "+heartbeat.scheduled_at:"\nScheduler heartbeat: not recorded") +"\n\nTask planner: "+plannerLabel+"\nNVIDIA planning: "+(nimPlanningReady?"configured; live inference not yet proven":"locked by configuration or entitlement") +"\nAgent execution: "+(executionReady?"enabled by configuration; acceptance still required":"LOCKED")+"\nExecution remains subject to owner approval and separate sensitive-operation approval.";
+  return "Transactra status\n\nWebhook: "+webhookState+"\nD1 event store: connected\nTelegram updates stored: "+(events?.total??0)+"\nLatest update: "+(events?.latest??"none")+(heartbeat?.scheduled_at?"\nScheduler heartbeat: "+heartbeat.scheduled_at:"\nScheduler heartbeat: not recorded") +"\n\nTask planner: "+plannerLabel+"\nCloudPilot inference: "+(nimPlanningReady?"configured; live inference not yet proven":"locked by configuration or entitlement") +"\nAgent execution: "+(executionReady?"enabled by configuration; acceptance still required":"LOCKED")+"\nExecution remains subject to owner approval and separate sensitive-operation approval.";
  }
- if(command.startsWith("/nvidia")||command==="/provider"){ const enabled=await getNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID); return "NVIDIA NIM command router reached Cloudflare production, but no matching action was selected. Use /nvidia status, /nvidia on, /nvidia off, or /provider. Runtime is "+(enabled?"ON":"OFF")+"."; } if(command.startsWith("/"))return "That command is not connected to the Cloudflare Telegram runtime yet. Use /help for the commands currently available.";
+ if(command.startsWith("/nvidia")||command==="/provider"){ const enabled=await getNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID); return "CloudPilot command router reached Transactra production, but no matching action was selected. Use /cloudpilot status, /cloudpilot test, /nvidia on, /nvidia off, or /provider. Runtime is "+(enabled?"ON":"OFF")+"."; } if(command.startsWith("/"))return "That command is not connected to the Cloudflare Telegram runtime yet. Use /help for the commands currently available.";
  const liveCheck=/^TRANSACTRA_CLOUDPILOT_LIVE_CHECK_([A-Z0-9_]{8,64})$/.exec(text);
   if(liveCheck){
    const enabled=String(env.NVIDIA_NIM_EXECUTION_ENABLED||"").trim().toLowerCase()==="true";
@@ -479,9 +476,9 @@ export async function makeReply(update,env){
     return "CloudPilot live check failed. No alternate provider or replay was attempted. "+String(error instanceof Error?error.message:"provider error").slice(0,180);
    }
   }
-  const chatEnabled=String(env.NVIDIA_NIM_EXECUTION_ENABLED||"").trim().toLowerCase()==="true";
+  const chatEnabled=String(env.NVIDIA_NIM_EXECUTION_ENABLED||"").trim().toLowerCase()==="true"&&cloudPilotConfig(env).ok;
  if(!chatEnabled||!isNvidiaNimDeveloperAccessConfirmed(env)||!(await getNvidiaRuntimeEnabled(env.DB,env.TELEGRAM_OWNER_ID))){
-  return "I received your message, but NVIDIA NIM chat is paused by its service, entitlement, or execution gate. Check /nvidia status. No model request was sent and no paid fallback is configured.";
+  return "I received your message, but CloudPilot inference is paused by its endpoint, service, entitlement, or execution gate. Check /cloudpilot status. No model request was sent and no paid fallback is configured.";
  }
  if(text.length>4000)return "Message is too long for the current safe chat limit (4,000 characters).";
  try{
