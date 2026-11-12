@@ -1,45 +1,47 @@
-# Telegram control channel
+# Telegram-first control
 
-Production Telegram delivery is owned exclusively by the Cloudflare Worker
-`transactra-edge`. Telegram sends updates to the Worker webhook, the Worker validates
-Telegram's secret-token header, queues each update, persists it in production D1, and sends
-the owner reply through the Telegram Bot API.
+Telegram is the primary operating interface for Transactra. The React web app remains an optional activity dashboard; payment requests, approvals, transaction history and summaries are available in the bot.
 
-## Production ownership
+## First-time setup
 
-- Webhook endpoint: `https://transactra-edge.himaneeshreddyk.workers.dev/telegram/webhook`.
-- Production secrets are held by the Cloudflare Worker: `TELEGRAM_BOT_TOKEN` and
-  `TELEGRAM_WEBHOOK_SECRET`.
-- The Worker is the only production webhook registrar and receiver.
-- Do not configure AppDeploy, a VM, or another service to call `setWebhook` or
-  `deleteWebhook` for the production bot.
-- Do not run the legacy `npm run start:telegram` long-polling transport. It is disabled
-  and exits without calling Telegram.
-- On an already-provisioned VM, stop and permanently disable the installed unit:
+1. In Telegram, open [@BotFather](https://t.me/BotFather), run `/newbot`, and copy the bot token.
+2. Open [@userinfobot](https://t.me/userinfobot) and copy your numeric Telegram user ID.
+3. Copy `.env.example` to `.env`.
+4. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OWNER_ID`. Keep the bot token private.
+5. Configure PayPal Sandbox credentials and PostgreSQL as described in the main README.
+6. Start the API with `npm run dev:api`.
+7. In a second terminal, start the bot with `npm run start:telegram`.
+8. Open your bot in Telegram and send `/start`.
 
-  ```bash
-  sudo systemctl disable --now transactra-telegram.service
-  sudo systemctl mask transactra-telegram.service
-  sudo systemctl daemon-reload
-  ```
-- The staging deployment workflow may configure only its separate staging bot. It must
-  never receive the production bot token.
+The bot uses Telegram long polling. It accepts commands only from the configured owner ID in a private chat. No public webhook or Telegram hosting service is required for local development.
 
-## Delivery path
+If a webhook is already registered for this bot, the poller will stop rather than silently replace it. To deliberately switch this bot from webhook delivery to polling, set `TELEGRAM_CLEAR_WEBHOOK=true` for one startup, start the bot, then return it to `false`. Do not do this if another production service is intended to own the webhook.
 
-1. Telegram posts an update to `POST /telegram/webhook`.
-2. The Worker validates `X-Telegram-Bot-Api-Secret-Token` before accepting the body.
-3. The Worker enqueues the update on `transactra-events` and acknowledges the webhook.
-4. The production Queue consumer writes the idempotent inbound event to D1.
-5. The consumer writes the owner reply to `telegram_reply_outbox`, calls
-   `sendMessage`, and marks the outbox row sent.
+## What you can do in Telegram
 
-## Security and operations
+- Send natural-language payment requests, such as `Pay $25 to Alex for dinner`.
+- Review amount, currency, recipient label and purpose.
+- Approve or discard a payment draft using inline buttons.
+- Open the PayPal Sandbox approval page from the chat.
+- Return to Telegram and ask Transactra to capture the approved order.
+- Use `/history` for recent transactions.
+- Use `/summary` for confirmed captured totals.
+- Use `/cancel` to clear unsubmitted drafts.
+- Use `/help` to see commands.
 
-- Only private-chat messages from the configured owner ID are accepted by command handling.
-- Never expose the bot token or webhook secret in logs, source files, diagnostics, or chat.
-- Verify the live webhook with Telegram `getWebhookInfo` using the Cloudflare-held token.
-- A production acceptance test requires a fresh real Telegram command, its matching D1
-  inbound event, a sent reply-outbox row, and confirmation that the reply arrived in Telegram.
-- Mem0 synchronization is a separate acceptance check; a healthy Telegram round trip does
-  not prove that a memory was synchronized to Mem0.
+The capture callback carries the PayPal order ID and reads the transaction from PostgreSQL, so the user can return to the chat after a bot restart.
+
+## Payment approval boundary
+
+Telegram is the control plane, but PayPal buyer approval still happens on PayPal's secure checkout page (opened from a Telegram inline URL button). The bot never asks for PayPal passwords, card numbers, client secrets or one-time codes. After buyer approval, the bot calls the server-side PayPal Orders API capture endpoint. A payment is reported as completed only when PayPal returns a completed capture.
+
+The recipient in a natural-language request is a transaction label in this first-party merchant checkout. It does not route funds to an arbitrary third party. Marketplace payouts require a separately approved PayPal multiparty/platform integration.
+
+## Runtime
+
+- API: `npm run dev:api`
+- Telegram bot: `npm run start:telegram`
+- Optional dashboard: `npm run dev`
+- API base URL for the bot: `API_BASE_URL` (defaults to `http://127.0.0.1:8787`)
+
+For production, run the API and bot as supervised services on a trusted host, keep both bound to private/internal networking, use a managed PostgreSQL database, and store all secrets in the host's secret manager. Do not commit `.env`.
