@@ -2,11 +2,22 @@ import {useEffect,useMemo,useState} from "react";
 type Intent={amount:string;currency:string;recipient:string;purpose:string;confidence:number;source:"rules"|"model"};
 type Tx={id:string;recipient:string;purpose:string;amount:string;currency:string;status:string;created_at:string};
 type ConnectedAccount={payerId:string;email:string|null;name:string|null;verified:boolean;connectedAt:string;scope:string|null};
-declare global{interface Window{paypal?:{Buttons:(options:Record<string,unknown>)=>{render:(selector:string)=>Promise<void>}}}}
+declare global{interface Window{paypal?:{Buttons:(options:Record<string,unknown>)=>{render:(selector:string)=>Promise<void>}};onTelegramAuth?:(user:Record<string,unknown>)=>void}}
 const money=(a:string,c:string)=>new Intl.NumberFormat("en-US",{style:"currency",currency:c}).format(Number(a));
 export default function App(){
- const [prompt,setPrompt]=useState("Pay $24.50 to Alex for dinner"),[intent,setIntent]=useState<Intent|null>(null),[tx,setTx]=useState<Tx[]>([]),[clientId,setClientId]=useState(""),[error,setError]=useState(""),[notice,setNotice]=useState(""),[busy,setBusy]=useState(false),[parsing,setParsing]=useState(false),[activity,setActivity]=useState(false),[buttons,setButtons]=useState(false),[connected,setConnected]=useState(false),[account,setAccount]=useState<ConnectedAccount|null>(null);
- async function refresh(){try{const [c,t,s]=await Promise.all([fetch("/api/config"),fetch("/api/transactions"),fetch("/api/auth/paypal/status")]);if(c.ok){const x=await c.json();setClientId(x.paypalClientId||"");}if(t.ok){const x=await t.json();setTx(x.transactions||[]);}if(s.ok){const x=await s.json();setConnected(Boolean(x.connected));setAccount(x.account||null);}}catch{/* API connection status is shown inline */}}
+ const [prompt,setPrompt]=useState("Pay $24.50 to Alex for dinner"),[intent,setIntent]=useState<Intent|null>(null),[tx,setTx]=useState<Tx[]>([]),[clientId,setClientId]=useState(""),[error,setError]=useState(""),[notice,setNotice]=useState(""),[busy,setBusy]=useState(false),[parsing,setParsing]=useState(false),[activity,setActivity]=useState(false),[buttons,setButtons]=useState(false),[connected,setConnected]=useState(false),[account,setAccount]=useState<ConnectedAccount|null>(null),[telegramBot,setTelegramBot]=useState(""),[telegramUser,setTelegramUser]=useState<{id:string;firstName:string;username:string|null}|null>(null),[authChecked,setAuthChecked]=useState(false),[authError,setAuthError]=useState("");
+ async function refresh(){try{const [c,t,s]=await Promise.all([fetch("/api/config"),fetch("/api/transactions"),fetch("/api/auth/paypal/status")]);if(c.ok){const x=await c.json();setClientId(x.paypalClientId||"");setTelegramBot(x.telegramBotUsername||"");}if(t.ok){const x=await t.json();setTx(x.transactions||[]);}if(s.ok){const x=await s.json();setConnected(Boolean(x.connected));setAccount(x.account||null);}}catch{/* API connection status is shown inline */}}
+ async function telegramLogin(payload:Record<string,unknown>){setAuthError("");try{const r=await fetch("/api/auth/telegram/login",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw Error(d.error||"Telegram login failed");setTelegramUser(d.user);await refresh();}catch(e){setAuthError(e instanceof Error?e.message:"Telegram login failed");}}
+ useEffect(()=>{
+  void (async()=>{try{const [c,m]=await Promise.all([fetch("/api/config"),fetch("/api/auth/telegram/me")]);if(c.ok){const x=await c.json();setTelegramBot(x.telegramBotUsername||"");setClientId(x.paypalClientId||"");}if(m.ok){const x=await m.json();setTelegramUser(x.user||null);}}catch(e){setAuthError(e instanceof Error?e.message:"Unable to check Telegram session");}finally{setAuthChecked(true);}})();
+ },[]);
+ useEffect(()=>{
+  if(!telegramBot||telegramUser)return;
+  window.onTelegramAuth=(user)=>{void telegramLogin(user);};
+  const script=document.createElement("script");script.async=true;script.src="https://telegram.org/js/telegram-widget.js?22";script.setAttribute("data-telegram-login",telegramBot);script.setAttribute("data-size","large");script.setAttribute("data-userpic","false");script.setAttribute("data-onauth","onTelegramAuth(user)");
+  const host=document.getElementById("telegram-login-host");if(host){host.innerHTML="";host.appendChild(script);}
+  return()=>{script.remove();delete window.onTelegramAuth;};
+ },[telegramBot,telegramUser]);
  useEffect(()=>{
   const p=new URLSearchParams(window.location.search);
   const status=p.get("paypal_connection");
@@ -36,14 +47,17 @@ export default function App(){
   await instance.render("#paypal-button-host");setButtons(true);
  }catch(e){setError(e instanceof Error?e.message:"Unable to start checkout");}finally{setBusy(false);}}
  async function disconnectAccount(){if(!confirm("Are you sure you want to disconnect your PayPal account?"))return;setBusy(true);setError("");setNotice("");try{const r=await fetch("/api/auth/paypal/disconnect",{method:"POST"});const d=await r.json();if(!r.ok)throw Error(d.error||"Failed to disconnect account");setNotice("PayPal account disconnected.");await refresh();}catch(e){setError(e instanceof Error?e.message:"Failed to disconnect account");}finally{setBusy(false);}}
+ async function logout(){await fetch("/api/auth/telegram/logout",{method:"POST"});setTelegramUser(null);setConnected(false);setAccount(null);setTx([]);}
  function newPayment(){setActivity(false);setIntent(null);setPrompt("");setError("");setNotice("");setButtons(false);}
+ if(!authChecked)return <div className="telegram-gate"><div className="telegram-login-card"><div className="brand-mark">T.</div><h1>Transactra</h1><p>Checking your Telegram session…</p></div></div>;
+ if(!telegramUser)return <div className="telegram-gate"><div className="telegram-login-card"><div className="brand-mark">T.</div><div className="eyebrow"><i/> SECURE SIGN IN</div><h1>Welcome to<br/><em>Transactra.</em></h1><p>Sign in with your Telegram account to access your payment workspace and securely connect PayPal.</p><div id="telegram-login-host" className="telegram-login-host"/>{!telegramBot&&<div className="alert error">Telegram login is not configured. Set TELEGRAM_BOT_USERNAME and TELEGRAM_BOT_TOKEN in the API environment.</div>}{authError&&<div className="alert error" role="alert">{authError}</div>}<small>Your Telegram identity is verified by Telegram. Transactra stores a protected, revocable browser session—not your Telegram password.</small></div></div>;
  return <div className="shell">
   <aside className="sidebar"><a className="brand" href="#"><span className="mark"><i/><i/><i/></span>transactra<span className="dot">.</span></a><div className="side-label">WORKSPACE</div>
    <button className={!activity?"nav active":"nav"} onClick={()=>setActivity(false)}><b>⌁</b> Payment desk <small>⌘1</small></button>
    <button className={activity?"nav active":"nav"} onClick={()=>setActivity(true)}><b>◷</b> Activity <small>{tx.length}</small></button>
    <div className="side-bottom"><div className="sandbox"><span className="pulse"/> <div><strong>Sandbox mode</strong><small>Test transactions only</small></div><em>TEST</em></div><div className="profile"><span className="avatar">{account?.name?.[0]||"T"}</span><div><strong>{account?.name||"Transactra workspace"}</strong><small style={{color:connected?"#40c69b":"#8190aa"}}>{connected?"PayPal Connected ✓":"Personal account"}</small></div><span className="dots">···</span></div></div>
   </aside>
-  <main><header className="topbar"><div>Workspace <span>/</span> <strong>{activity?"Activity":"Payment desk"}</strong></div><div className="env"><i/> PAYPAL SANDBOX <span className="user">{account?.name?.[0]||"T"}</span></div></header>
+  <main><header className="topbar"><div>Workspace <span>/</span> <strong>{activity?"Activity":"Payment desk"}</strong></div><div className="env"><i/> PAYPAL SANDBOX <span className="user">{telegramUser.firstName[0]||"T"}</span><button className="signout" onClick={logout}>Sign out · {telegramUser.firstName}</button></div></header>
    <div className="content">{!activity?<><section className="hero"><div><div className="eyebrow"><i/> YOUR AI PAYMENT ASSISTANT</div><h1>Payments,<br/><em>understood.</em></h1><p>Say what needs to be paid. Transactra turns your words into a clear, reviewable PayPal checkout.</p></div><div className="seal"><div>T<span>✳</span></div><small>INTENT → APPROVAL<br/>→ SETTLEMENT</small></div></section>
     <section className="paypal-card">
      <div className="paypal-card-info">

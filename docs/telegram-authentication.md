@@ -1,25 +1,30 @@
-# PayPal OAuth authentication gateway contract
+# Telegram authentication for Transactra
 
-The API does not implement end-user login. The existing control-plane bearer token is a shared operator credential, not a per-user browser session. PayPal OAuth routes therefore accept identity only from a trusted edge authentication gateway.
+Transactra web sign-in uses the official Telegram Login Widget. No separate email/password provider or client-supplied user ID is trusted.
 
-## Required gateway behavior
+## Configure Telegram
 
-1. Authenticate the browser using the application's real identity provider and its server-side session.
-2. Strip all incoming `x-transactra-auth-*` headers before forwarding the request.
-3. On every request to `/api/auth/paypal/*`, inject:
-   - `x-transactra-auth-user`: stable authenticated subject (1–128 allowed identifier characters).
-   - `x-transactra-auth-session`: stable, unpredictable session ID (32–256 base64url characters); retain the same ID across the PayPal redirect/callback.
-   - `x-transactra-auth-timestamp`: current Unix epoch in milliseconds.
-   - `x-transactra-auth-signature`: lowercase/uppercase hex HMAC-SHA256 of `userId + "\n" + sessionId + "\n" + timestamp`.
-4. Sign with `AUTH_GATEWAY_SHARED_SECRET`, a randomly generated secret of at least 32 characters, configured identically in the gateway and API.
-5. Keep the API private behind the gateway. Do not expose the API listener directly to the public internet.
+1. Create or select the Transactra bot with @BotFather.
+2. Run `/setdomain` for that bot and register the exact production web-app domain (without a path).
+3. Set `TELEGRAM_BOT_USERNAME` to the bot's public username (without @).
+4. Set `TELEGRAM_BOT_TOKEN` to the bot token on the API server only. Never expose it to the browser.
+5. Apply migrations through `0007_telegram_web_auth.sql`.
 
-The API rejects missing, malformed, stale, or incorrectly signed assertions. A browser-supplied user ID or session ID is never trusted directly.
+## Sign-in and session flow
 
-## Redirect policy
+1. Telegram Login Widget returns a signed user payload to the browser.
+2. The API verifies the Telegram HMAC using the bot token, enforces a five-minute auth-date window, and rejects malformed signatures.
+3. A signed payload hash is consumed once to prevent login-payload replay.
+4. The API creates a random, seven-day server-side session. Only its SHA-256 hash is stored in PostgreSQL.
+5. The browser receives an HttpOnly, SameSite=Lax cookie (Secure and __Host- prefixed in production).
+6. Logout revokes the server-side session. Expired/revoked sessions are rejected.
+7. PayPal OAuth state stores the Telegram user ID and session hash. The callback must arrive with the same live Telegram session; another Telegram user or browser session cannot consume it.
 
-The OAuth callback always returns to the single configured `FRONTEND_URL`. The `redirect_url` query parameter is rejected unless it exactly matches that configured URL. The API callback URI must be explicitly configured with `PAYPAL_REDIRECT_URI` and must use HTTPS outside local development. Request Host headers are not used to construct OAuth redirect URIs.
+Telegram user IDs are the stable Transactra user IDs. The bot's existing `TELEGRAM_OWNER_ID` setting continues to restrict privileged bot commands; it is not used as web authentication.
 
-## Deployment gates
+## Deployment requirements
 
-Set `AUTH_GATEWAY_SHARED_SECRET`, `TOKEN_ENCRYPTION_SECRET`, `API_BASE_URL`, `PAYPAL_REDIRECT_URI`, and `FRONTEND_URL` before enabling OAuth. The repository currently contains no identity provider or gateway implementation; this contract must be wired to the deployed authentication gateway before real users can connect accounts.
+- Use HTTPS in production.
+- Keep the API behind the same origin as the frontend so the session cookie is sent on the PayPal callback.
+- Register the domain with @BotFather using `/setdomain`.
+- Configure `TELEGRAM_BOT_USERNAME`, `TELEGRAM_BOT_TOKEN`, `DATABASE_URL`, `TOKEN_ENCRYPTION_SECRET`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_REDIRECT_URI`, `API_BASE_URL`, and `FRONTEND_URL`.

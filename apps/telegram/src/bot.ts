@@ -20,7 +20,7 @@ async function tg<T=unknown>(method:string, body:Record<string,unknown> = {}):Pr
 }
 async function api<T=Record<string,unknown>>(path:string, method="GET", body?:unknown):Promise<T> {
   const response = await fetch(apiBase + path, {
-    method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId},
+    method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId,"x-transactra-bot-secret":process.env.TELEGRAM_API_SHARED_SECRET||""},
     ...(body===undefined?{}:{body:JSON.stringify(body)}), signal:AbortSignal.timeout(20000)
   });
   const data = await response.json() as T & {error?:string};
@@ -155,7 +155,7 @@ export async function processTelegramUpdate(update:any) {
 }
 
 async function main() {
-  if (!token || !ownerId) throw new Error("Set TELEGRAM_BOT_TOKEN and TELEGRAM_OWNER_ID in .env before starting the Transactra Telegram bot.");
+  if (!token || !ownerId || (process.env.TELEGRAM_API_SHARED_SECRET||"").length < 32) throw new Error("Set TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID and a 32+ character TELEGRAM_API_SHARED_SECRET in .env before starting the Transactra Telegram bot.");
   if (process.env.TELEGRAM_CLEAR_WEBHOOK==="true") await tg("deleteWebhook",{drop_pending_updates:false});
   const webhook=await tg<{url?:string}>("getWebhookInfo");
   if (webhook.url) throw new Error("A Telegram webhook is already configured. Set TELEGRAM_CLEAR_WEBHOOK=true once to switch this bot to polling, then restart it.");

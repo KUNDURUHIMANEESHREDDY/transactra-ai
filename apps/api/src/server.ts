@@ -13,7 +13,7 @@ import {
   disconnectPayPalAccount,
   getPayPalConfig
 } from "./paypal-oauth.js";
-import { getAuthenticatedRequestIdentity } from "./request-auth.js";
+import { createTelegramSession, getAuthenticatedRequestIdentity, revokeTelegramSession, telegramBotUsername, verifyTelegramLogin } from "./request-auth.js";
 const port=Number(process.env.PORT||8787),host=process.env.HOST||"127.0.0.1";
 const clientId=process.env.PAYPAL_CLIENT_ID||"",secret=process.env.PAYPAL_CLIENT_SECRET||"";
 const paypalBase=process.env.PAYPAL_ENV==="live"?"https://api-m.paypal.com":"https://api-m.sandbox.paypal.com";
@@ -42,17 +42,20 @@ async function parse(text:string):Promise<Intent>{
  }catch{/* no-key deterministic fallback */}
  return rules(text);
 }
-async function ensureDb(){if(!db)throw Error("DATABASE_URL is required. Start PostgreSQL with docker compose and configure .env.");await db.query("CREATE TABLE IF NOT EXISTS payment_transactions(id UUID PRIMARY KEY,raw_prompt TEXT NOT NULL,recipient TEXT NOT NULL,purpose TEXT NOT NULL,amount NUMERIC(18,2) NOT NULL CHECK(amount>0),currency CHAR(3) NOT NULL,status TEXT NOT NULL,paypal_order_id TEXT UNIQUE,paypal_capture_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");}
+async function ensureDb(){if(!db)throw Error("DATABASE_URL is required. Start PostgreSQL with docker compose and configure .env.");await db.query("CREATE TABLE IF NOT EXISTS payment_transactions(id UUID PRIMARY KEY,user_id TEXT NOT NULL,raw_prompt TEXT NOT NULL,recipient TEXT NOT NULL,purpose TEXT NOT NULL,amount NUMERIC(18,2) NOT NULL CHECK(amount>0),currency CHAR(3) NOT NULL,status TEXT NOT NULL,paypal_order_id TEXT UNIQUE,paypal_capture_id TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+ await db.query("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS user_id TEXT");}
 async function token(){if(!clientId||!secret)throw Error("PayPal Sandbox credentials are not configured on the server.");const auth=Buffer.from(clientId+":"+secret).toString("base64");const r=await fetch(paypalBase+"/v1/oauth2/token",{method:"POST",headers:{Authorization:"Basic "+auth,"Content-Type":"application/x-www-form-urlencoded"},body:"grant_type=client_credentials"});const d=await r.json() as {access_token?:string;error_description?:string};if(!r.ok||!d.access_token)throw Error(d.error_description||"PayPal authentication failed.");return d.access_token;}
 async function paypal(path:string,t:string,method:string,payload?:unknown,requestId?:string){const r=await fetch(paypalBase+path,{method,headers:{Authorization:"Bearer "+t,"Content-Type":"application/json",...(requestId?{"PayPal-Request-Id":requestId}:{})},...(payload?{body:JSON.stringify(payload)}:{})});const d=await r.json() as Record<string,unknown>;if(!r.ok)throw Error(String(d.message||d.name||"PayPal request failed"));return d;}
 async function ensureWorkflowSchema(){
  await ensureDb();
- await db!.query("CREATE TABLE IF NOT EXISTS payment_workflows(id UUID PRIMARY KEY,raw_prompt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('PENDING_APPROVAL','APPROVED','IN_PROGRESS','COMPLETED','REJECTED','FAILED')),step_count INTEGER NOT NULL CHECK(step_count BETWEEN 2 AND 8),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+ await db!.query("CREATE TABLE IF NOT EXISTS payment_workflows(id UUID PRIMARY KEY,user_id TEXT NOT NULL,raw_prompt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('PENDING_APPROVAL','APPROVED','IN_PROGRESS','COMPLETED','REJECTED','FAILED')),step_count INTEGER NOT NULL CHECK(step_count BETWEEN 2 AND 8),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+ await db!.query("ALTER TABLE payment_workflows ADD COLUMN IF NOT EXISTS user_id TEXT");
  await db!.query("CREATE TABLE IF NOT EXISTS payment_workflow_steps(id UUID PRIMARY KEY,workflow_id UUID NOT NULL REFERENCES payment_workflows(id),sequence_no INTEGER NOT NULL CHECK(sequence_no BETWEEN 1 AND 8),recipient TEXT NOT NULL,purpose TEXT NOT NULL,amount NUMERIC(18,2) NOT NULL CHECK(amount>0),currency CHAR(3) NOT NULL,status TEXT NOT NULL DEFAULT 'PENDING',paypal_order_id TEXT UNIQUE,approve_url TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(workflow_id,sequence_no))");
  await db!.query("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS workflow_id UUID REFERENCES payment_workflows(id)");
  await db!.query("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS workflow_step_id UUID REFERENCES payment_workflow_steps(id)");
 }
-function requireOwner(req:IncomingMessage){const expected=String(process.env.TELEGRAM_OWNER_ID||"");const supplied=String(req.headers["x-transactra-owner-id"]||"");return Boolean(expected&&supplied&&expected===supplied);}
+function isTelegramBotRequest(req:IncomingMessage){const expected=String(process.env.TELEGRAM_API_SHARED_SECRET||"");const supplied=String(req.headers["x-transactra-bot-secret"]||"");if(expected.length<32||!supplied)return false;const a=Buffer.from(expected),b=Buffer.from(supplied);return a.length===b.length&&timingSafeEqual(a,b);}
+function requireOwner(req:IncomingMessage){const expected=String(process.env.TELEGRAM_OWNER_ID||"");const supplied=String(req.headers["x-transactra-owner-id"]||"");return Boolean(isTelegramBotRequest(req)&&expected&&supplied&&expected===supplied);}
 function splitPaymentInstructions(text:string){return text.split(/\s*(?:;|\n+|\bthen\b)\s*/i).map(x=>x.trim()).filter(Boolean);}
 async function createWorkflowOrder(workflowId:string){
  const q=await db!.query("SELECT id,sequence_no,recipient,purpose,amount::text,currency FROM payment_workflow_steps WHERE workflow_id=$1 AND status='READY' ORDER BY sequence_no LIMIT 1",[workflowId]);
@@ -61,7 +64,7 @@ async function createWorkflowOrder(workflowId:string){
  const claim=await db!.query("UPDATE payment_workflow_steps SET status='CREATING',updated_at=NOW() WHERE id=$1 AND status='READY' RETURNING id",[p.id]);
  if(!claim.rowCount)return {pending:true};
  const txId=randomUUID();
- await db!.query("INSERT INTO payment_transactions(id,raw_prompt,recipient,purpose,amount,currency,status,workflow_id,workflow_step_id) VALUES($1,$2,$3,$4,$5,$6,'CREATING',$7,$8)",[txId,"Approved workflow "+workflowId,p.recipient,p.purpose,p.amount,p.currency,workflowId,p.id]);
+ await db!.query("INSERT INTO payment_transactions(id,user_id,raw_prompt,recipient,purpose,amount,currency,status,workflow_id,workflow_step_id) VALUES($1,$2,$3,$4,$5,$6,$7,'CREATING',$8,$9)",[txId,process.env.TELEGRAM_OWNER_ID||"telegram-owner","Approved workflow "+workflowId,p.recipient,p.purpose,p.amount,p.currency,workflowId,p.id]);
  try{
   const access=await token();
   const order=await paypal("/v2/checkout/orders",access,"POST",{intent:"CAPTURE",purchase_units:[{reference_id:txId,description:p.purpose.slice(0,127),amount:{currency_code:p.currency,value:p.amount}}],application_context:{brand_name:"Transactra",user_action:"PAY_NOW",shipping_preference:"NO_SHIPPING"}},txId) as {id?:string;links?:Array<{rel?:string;href?:string}>};
@@ -95,14 +98,38 @@ async function route(req:IncomingMessage,res:ServerResponse){
    try{await processTelegramUpdate(update);processedTelegramUpdates.add(updateId);if(processedTelegramUpdates.size>2000)processedTelegramUpdates.delete(processedTelegramUpdates.values().next().value!);return send(res,200,{ok:true});}
    catch(e){console.error("Telegram webhook processing failed:",e instanceof Error?e.message:"unknown error");return send(res,500,{error:"Telegram update processing failed."});}
   }
-  if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),environment:process.env.PAYPAL_ENV||"sandbox"});
+  if(req.method==="POST"&&url.pathname==="/api/auth/telegram/login"){
+   if(!db)return send(res,503,{error:"Database is required for Telegram sessions."});
+   if(!process.env.TELEGRAM_BOT_USERNAME||!process.env.TELEGRAM_BOT_TOKEN)return send(res,503,{error:"Telegram authentication is not configured."});
+   if(!(req.headers["content-type"]||"").toLowerCase().startsWith("application/json"))return send(res,415,{error:"Content-Type must be application/json."});
+   const payload=await read(req);
+   const user=verifyTelegramLogin(payload);
+   if(!user)return send(res,401,{error:"Telegram authentication failed or expired. Please sign in again."});
+   try{await createTelegramSession(db,user,res);}catch(e){if((e as {code?:string})?.code==="23505")return send(res,401,{error:"This Telegram login payload has already been used. Sign in again."});throw e;}
+   return send(res,200,{authenticated:true,user:{id:user.telegramId,firstName:user.firstName,username:user.username}});
+  }
+  if(req.method==="GET"&&url.pathname==="/api/auth/telegram/me"){
+   if(!db)return send(res,503,{error:"Database is required for Telegram sessions."});
+   const identity=await getAuthenticatedRequestIdentity(req,db);
+   return send(res,identity?200:401,identity?{authenticated:true,user:{id:identity.telegramId,firstName:identity.firstName,username:identity.username}}:{authenticated:false});
+  }
+  if(req.method==="POST"&&url.pathname==="/api/auth/telegram/logout"){
+   if(!db)return send(res,503,{error:"Database is required for Telegram sessions."});
+   await revokeTelegramSession(req,res,db);
+   return send(res,200,{authenticated:false});
+  }
+  if(req.method==="GET"&&url.pathname==="/api/config")return send(res,200,{paypalClientId:clientId,paypalConfigured:Boolean(clientId&&secret),telegramBotUsername:telegramBotUsername(),environment:process.env.PAYPAL_ENV||"sandbox"});
 
   // --- PayPal OAuth 2.0 Account Connection ---
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/connect"){
-   const identity=getAuthenticatedRequestIdentity(req);
-   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,503,{error:"Database is required for persistent OAuth connection."});
+   const identity=await getAuthenticatedRequestIdentity(req,db);
+   if(!identity)return send(res,401,{error:"Telegram authentication required."});
    await ensurePayPalConnectionSchema(db);
+   const config=getPayPalConfig();
+   const fetchSite=String(req.headers["sec-fetch-site"]||"");
+   const origin=String(req.headers.origin||"");
+   if(fetchSite==="cross-site"||(origin&&new URL(origin).origin!==new URL(config.frontendUrl).origin))return send(res,403,{error:"Cross-site OAuth initiation is not allowed."});
    const redirectUrl=url.searchParams.get("redirect_url")||undefined;
    const {state,authorizeUrl}=await createOAuthState(db,identity.userId,identity.sessionHash,redirectUrl);
    const wantsJson=url.searchParams.get("format")==="json"||req.headers.accept?.includes("application/json");
@@ -112,9 +139,9 @@ async function route(req:IncomingMessage,res:ServerResponse){
   }
 
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/callback"){
-   const identity=getAuthenticatedRequestIdentity(req);
-   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,503,{error:"Database is required for OAuth callback."});
+   const identity=await getAuthenticatedRequestIdentity(req,db);
+   if(!identity)return send(res,401,{error:"Telegram session required for PayPal callback."});
    await ensurePayPalConnectionSchema(db);
    const config=getPayPalConfig();
    const code=url.searchParams.get("code");
@@ -157,22 +184,26 @@ async function route(req:IncomingMessage,res:ServerResponse){
   }
 
   if(req.method==="GET"&&url.pathname==="/api/auth/paypal/status"){
-   const identity=getAuthenticatedRequestIdentity(req);
-   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,200,{connected:false,account:null,dbConnected:false});
+   const identity=await getAuthenticatedRequestIdentity(req,db);
+   if(!identity)return send(res,401,{error:"Telegram authentication required."});
    await ensurePayPalConnectionSchema(db);
    const status=await getConnectedAccountStatus(db,identity.userId);
    return send(res,200,status);
   }
 
   if(req.method==="POST"&&url.pathname==="/api/auth/paypal/disconnect"){
-   const identity=getAuthenticatedRequestIdentity(req);
-   if(!identity)return send(res,401,{error:"Authenticated browser session required."});
    if(!db)return send(res,503,{error:"Database is required to disconnect account."});
+   const identity=await getAuthenticatedRequestIdentity(req,db);
+   if(!identity)return send(res,401,{error:"Telegram authentication required."});
    await ensurePayPalConnectionSchema(db);
    const disconnected=await disconnectPayPalAccount(db,identity.userId);
    return send(res,200,{success:disconnected,message:disconnected?"PayPal account disconnected.":"No active PayPal connection found."});
   }
+  const webIdentity=db?await getAuthenticatedRequestIdentity(req,db):null;
+  const botRequest=isTelegramBotRequest(req);
+  if(!webIdentity&&!botRequest)return send(res,401,{error:"Telegram authentication required."});
+  const apiUserId=webIdentity?.userId||String(process.env.TELEGRAM_OWNER_ID||"");
   if(req.method==="POST"&&url.pathname==="/api/parse"){const b=await read(req);return send(res,200,{intent:await parse(String(b.text||""))});}
   if(req.method==="POST"&&url.pathname==="/api/workflows/plan"){
    if(!requireOwner(req))return send(res,401,{error:"Owner authentication required."});
@@ -181,7 +212,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
    const parts=splitPaymentInstructions(raw);
    if(parts.length<2||parts.length>8)return send(res,400,{error:"Use 2–8 payment instructions separated by semicolons, new lines, or 'then'."});
    const intents=[];for(const part of parts)intents.push(await parse(part));
-   const workflowId=randomUUID();await db!.query("INSERT INTO payment_workflows(id,raw_prompt,status,step_count) VALUES($1,$2,'PENDING_APPROVAL',$3)",[workflowId,raw,parts.length]);
+   const workflowId=randomUUID();await db!.query("INSERT INTO payment_workflows(id,user_id,raw_prompt,status,step_count) VALUES($1,$2,$3,'PENDING_APPROVAL',$4)",[workflowId,process.env.TELEGRAM_OWNER_ID||"telegram-owner",raw,parts.length]);
    for(let i=0;i<intents.length;i++){const p=intents[i]!;await db!.query("INSERT INTO payment_workflow_steps(id,workflow_id,sequence_no,recipient,purpose,amount,currency,status) VALUES($1,$2,$3,$4,$5,$6,$7,'PENDING')",[randomUUID(),workflowId,i+1,p.recipient,p.purpose,p.amount,p.currency]);}
    return send(res,201,{workflowId,status:"PENDING_APPROVAL",steps:intents.map((p,i)=>({sequence:i+1,...p})),totalAmountByCurrency:intents.reduce((a,p)=>{a[p.currency]=(a[p.currency]||0)+Number(p.amount);return a;},{} as Record<string,number>)});
   }
@@ -197,15 +228,15 @@ async function route(req:IncomingMessage,res:ServerResponse){
    return send(res,405,{error:"Method not allowed."});
   }
 
-  if(req.method==="GET"&&url.pathname==="/api/transactions"){await ensureDb();const q=await db!.query("SELECT id,recipient,purpose,amount::text,currency,status,paypal_order_id,created_at FROM payment_transactions ORDER BY created_at DESC LIMIT 50");return send(res,200,{transactions:q.rows});}
+  if(req.method==="GET"&&url.pathname==="/api/transactions"){await ensureDb();const q=botRequest?await db!.query("SELECT id,recipient,purpose,amount::text,currency,status,paypal_order_id,created_at FROM payment_transactions ORDER BY created_at DESC LIMIT 50"):await db!.query("SELECT id,recipient,purpose,amount::text,currency,status,paypal_order_id,created_at FROM payment_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",[apiUserId]);return send(res,200,{transactions:q.rows});}
   if(req.method==="POST"&&url.pathname==="/api/orders"){
    await ensureDb();const b=await read(req),amount=Number(b.amount),currency=String(b.currency||"USD").toUpperCase(),recipient=String(b.recipient||"").trim(),purpose=String(b.purpose||"Payment").trim();
    if(!Number.isFinite(amount)||amount<=0||amount>1000000||!currencies.has(currency)||!recipient||recipient.length>80)return send(res,400,{error:"Invalid payment details. Review amount, currency and recipient."});
-   const id=randomUUID();await db!.query("INSERT INTO payment_transactions(id,raw_prompt,recipient,purpose,amount,currency,status) VALUES($1,$2,$3,$4,$5,$6,'CREATING')",[id,String(b.rawPrompt||"").slice(0,1000),recipient,purpose.slice(0,120),amount.toFixed(2),currency]);
+   const id=randomUUID();await db!.query("INSERT INTO payment_transactions(id,user_id,raw_prompt,recipient,purpose,amount,currency,status) VALUES($1,$2,$3,$4,$5,$6,$7,'CREATING')",[id,apiUserId,String(b.rawPrompt||"").slice(0,1000),recipient,purpose.slice(0,120),amount.toFixed(2),currency]);
    try{const t=await token();const o=await paypal("/v2/checkout/orders",t,"POST",{intent:"CAPTURE",purchase_units:[{reference_id:id,description:purpose.slice(0,127),amount:{currency_code:currency,value:amount.toFixed(2)}}],application_context:{brand_name:"Transactra",user_action:"PAY_NOW",shipping_preference:"NO_SHIPPING"}},id) as {id?:string;status?:string;links?:Array<{rel?:string;href?:string}>};if(!o.id)throw Error("PayPal did not return an order ID.");await db!.query("UPDATE payment_transactions SET paypal_order_id=$1,status='CREATED',updated_at=NOW() WHERE id=$2",[o.id,id]);return send(res,200,{orderId:o.id,status:o.status||"CREATED",approveUrl:o.links?.find(x=>x.rel==="approve"||x.rel==="payer-action")?.href});}catch(e){await db!.query("UPDATE payment_transactions SET status='FAILED',updated_at=NOW() WHERE id=$1",[id]);throw e;}
   }
   const m=url.pathname.match(/^\/api\/orders\/([A-Z0-9]+)\/capture$/i);
-  if(req.method==="POST"&&m){await ensureDb();const id=m[1]!;const old=await db!.query("SELECT status,workflow_id,workflow_step_id FROM payment_transactions WHERE paypal_order_id=$1",[id]);if(!old.rowCount)return send(res,404,{error:"PayPal order is not associated with Transactra."});if(old.rows[0].status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true,workflowId:old.rows[0].workflow_id||undefined});const t=await token();const d=await paypal("/v2/checkout/orders/"+encodeURIComponent(id)+"/capture",t,"POST",{},id+"-capture") as {status?:string;purchase_units?:Array<{payments?:{captures?:Array<{id?:string}>}} >};const status=String(d.status||"UNKNOWN"),captureId=d.purchase_units?.[0]?.payments?.captures?.[0]?.id||null;await db!.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE paypal_order_id=$3",[status,captureId,id]);let workflowId:string|undefined,workflowComplete:boolean|undefined;if(old.rows[0].workflow_id&&old.rows[0].workflow_step_id){workflowId=String(old.rows[0].workflow_id);await db!.query("UPDATE payment_workflow_steps SET status=$1,updated_at=NOW() WHERE id=$2",[status==="COMPLETED"?"COMPLETED":"PAYMENT_"+status,old.rows[0].workflow_step_id]);if(status==="COMPLETED"){const remaining=await db!.query("SELECT id FROM payment_workflow_steps WHERE workflow_id=$1 AND status NOT IN ('COMPLETED','REJECTED') ORDER BY sequence_no LIMIT 1",[workflowId]);if(remaining.rowCount){await db!.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE id=$1 AND status='PENDING'",[remaining.rows[0].id]);}else{await db!.query("UPDATE payment_workflows SET status='COMPLETED',updated_at=NOW() WHERE id=$1",[workflowId]);workflowComplete=true;}}}return send(res,200,{status,captureId,workflowId,workflowComplete});}
+  if(req.method==="POST"&&m){await ensureDb();const id=m[1]!;const old=botRequest?await db!.query("SELECT status,workflow_id,workflow_step_id FROM payment_transactions WHERE paypal_order_id=$1",[id]):await db!.query("SELECT status,workflow_id,workflow_step_id FROM payment_transactions WHERE paypal_order_id=$1 AND user_id=$2",[id,apiUserId]);if(!old.rowCount)return send(res,404,{error:"PayPal order is not associated with Transactra."});if(old.rows[0].status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true,workflowId:old.rows[0].workflow_id||undefined});const t=await token();const d=await paypal("/v2/checkout/orders/"+encodeURIComponent(id)+"/capture",t,"POST",{},id+"-capture") as {status?:string;purchase_units?:Array<{payments?:{captures?:Array<{id?:string}>}} >};const status=String(d.status||"UNKNOWN"),captureId=d.purchase_units?.[0]?.payments?.captures?.[0]?.id||null;await db!.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE paypal_order_id=$3",[status,captureId,id]);let workflowId:string|undefined,workflowComplete:boolean|undefined;if(old.rows[0].workflow_id&&old.rows[0].workflow_step_id){workflowId=String(old.rows[0].workflow_id);await db!.query("UPDATE payment_workflow_steps SET status=$1,updated_at=NOW() WHERE id=$2",[status==="COMPLETED"?"COMPLETED":"PAYMENT_"+status,old.rows[0].workflow_step_id]);if(status==="COMPLETED"){const remaining=await db!.query("SELECT id FROM payment_workflow_steps WHERE workflow_id=$1 AND status NOT IN ('COMPLETED','REJECTED') ORDER BY sequence_no LIMIT 1",[workflowId]);if(remaining.rowCount){await db!.query("UPDATE payment_workflow_steps SET status='READY',updated_at=NOW() WHERE id=$1 AND status='PENDING'",[remaining.rows[0].id]);}else{await db!.query("UPDATE payment_workflows SET status='COMPLETED',updated_at=NOW() WHERE id=$1",[workflowId]);workflowComplete=true;}}}return send(res,200,{status,captureId,workflowId,workflowComplete});}
   return send(res,404,{error:"Route not found."});
  }catch(e){return send(res,500,{error:e instanceof Error?e.message:"Unexpected server error"});}
 }
