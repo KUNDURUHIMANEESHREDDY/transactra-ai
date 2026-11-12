@@ -72,7 +72,7 @@ async function sendPayPalConnect(env,m){
  const response=await fetch(apiBase+"/api/auth/paypal/connect",{method:"GET",headers:{"x-transactra-user-id":userId,"x-transactra-owner-id":owner,"x-transactra-auth-timestamp":timestamp,"x-transactra-auth-signature":signature,accept:"application/json"},redirect:"follow",signal:AbortSignal.timeout(15000)});
  const data=await response.json().catch(()=>null);
  if(!response.ok||typeof data?.authorizeUrl!=="string")throw Error(typeof data?.error==="string"?data.error:"paypal_connect_failed");
- const payload={chat_id:m.chat.id,text:"CONNECT PAYPAL · "+String(data.environment||"sandbox").toUpperCase()+"\n\nOpen PayPal's official authorization page. Sign in using your PayPal email or mobile number, then approve the requested access. Never send your password or one-time code in Telegram.",disable_web_page_preview:true,reply_markup:{inline_keyboard:[[{text:"Authorize PayPal",url:data.authorizeUrl}]]}};
+ const payload={chat_id:m.chat.id,text:"CONNECT PAYPAL · "+String(data.environment||"sandbox").toUpperCase()+"\n\nOpen PayPal's official authorization page. Sign in using your PayPal email or mobile number, then approve the requested access. Never send your password or one-time code in Telegram.\n\nPayPal sign-in: "+data.authorizeUrl,disable_web_page_preview:true,reply_markup:{inline_keyboard:[[{text:"Open PayPal Login",url:data.authorizeUrl}]]}};
  if(m.business_connection_id)payload.business_connection_id=m.business_connection_id;
  if(Number.isInteger(m.message_thread_id))payload.message_thread_id=m.message_thread_id;
  await tg(env,"sendMessage",payload);
