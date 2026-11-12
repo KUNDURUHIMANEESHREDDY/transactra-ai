@@ -63,4 +63,6 @@ test("production deploy can run only by explicit manual confirmation or a marked
   assert.match(release, /push:\s*branches:\s*- main/);
   assert.match(release, /inputs\.confirm_production == 'DEPLOY'/);
   assert.match(release, /contains\(github\.event\.head_commit\.message, '\[deploy-production\]'\)/);
+  assert.match(release, /runs-on: windows-latest/);
+  assert.doesNotMatch(release, /self-hosted/);
 });

@@ -22,7 +22,7 @@ concurrency:
 jobs:
   verify:
     if: github.ref == 'refs/heads/main' && ((github.event_name == 'workflow_dispatch' && inputs.confirm_production == 'DEPLOY') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy-production]')))
-    runs-on: [self-hosted, Windows, X64, transactra]
+    runs-on: windows-latest
     timeout-minutes: 40
     defaults:
       run:
@@ -78,7 +78,7 @@ jobs:
   deploy-production:
     needs: verify
     if: github.ref == 'refs/heads/main' && ((github.event_name == 'workflow_dispatch' && inputs.confirm_production == 'DEPLOY') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[deploy-production]')))
-    runs-on: [self-hosted, Windows, X64, transactra]
+    runs-on: windows-latest
     environment:
       name: transactra-production
       url: https://transactra-edge.himaneeshreddyk.workers.dev
