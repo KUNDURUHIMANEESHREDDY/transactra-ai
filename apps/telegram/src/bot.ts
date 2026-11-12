@@ -55,8 +55,19 @@ async function handleMessage(message:any) {
     } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not start PayPal authorization. Check the server configuration."); }
     return;
   }
+  if (text==="/ai" || text.startsWith("/ai ")) {
+    const prompt=text.slice(3).trim();
+    if(!prompt)return void await say(chatId,"Use /ai followed by a message. Example: /ai Explain how Transactra protects a PayPal payment.");
+    try {
+      const result=await api<{reply:string;model:string}>("/api/ai/chat","POST",{text:prompt});
+      await say(chatId,"CLOUDPILOT AI · "+result.model+"\n\n"+result.reply);
+    } catch(e) {
+      await say(chatId,e instanceof Error?e.message:"CloudPilot is unavailable. Check the inference endpoint and secret configuration.");
+    }
+    return;
+  }
   if (text==="/help") {
-    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2–8 step plan separated by semicolons, new lines, or “then”. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/connect - securely connect your PayPal account\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
+    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2–8 step plan separated by semicolons, new lines, or “then”. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/ai <message> - chat with CloudPilot AI\n/connect - securely connect your PayPal account\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
     return;
   }
   if (text==="/cancel") {
@@ -168,7 +179,7 @@ async function main() {
   const webhook=await tg<{url?:string}>("getWebhookInfo");
   if (webhook.url) throw new Error("A Telegram webhook is already configured. Set TELEGRAM_CLEAR_WEBHOOK=true once to switch this bot to polling, then restart it.");
   await tg("setMyCommands",{commands:[
-    {command:"start",description:"Open your Transactra payment desk"},
+    {command:"start",description:"Open your Transactra payment desk"},\n    {command:"ai",description:"Chat with CloudPilot AI"},
     {command:"history",description:"Show recent transactions"},
     {command:"summary",description:"Show captured payment totals"},
     {command:"cancel",description:"Discard pending payment drafts"},
