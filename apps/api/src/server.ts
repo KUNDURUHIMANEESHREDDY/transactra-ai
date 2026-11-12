@@ -107,7 +107,11 @@ async function ensureWorkflowSchema(){
 }
 function requireBotOwner(req:IncomingMessage){
  const owner=String(process.env.TELEGRAM_OWNER_ID||"");
- return owner.length>0 && getAuthenticatedUser(req)==="telegram:"+owner;
+ if(!owner||!/^\d{1,20}$/.test(owner))return false;
+ if(getAuthenticatedUser(req)==="telegram:"+owner)return true;
+ const expected=String(process.env.BACKEND_SHARED_SECRET||""),supplied=String(req.headers["x-transactra-edge-secret"]||""),user=String(req.headers["x-transactra-owner-id"]||"");
+ const a=Buffer.from(expected),b=Buffer.from(supplied);
+ return Boolean(expected.length>=32&&user===owner&&supplied&&a.length===b.length&&timingSafeEqual(a,b));
 }
 function telegramUserId(req:IncomingMessage){return "telegram:"+String(req.headers["x-transactra-owner-id"]||"");}
 async function loadUserFinancialLimits(client:any,userId:string){
