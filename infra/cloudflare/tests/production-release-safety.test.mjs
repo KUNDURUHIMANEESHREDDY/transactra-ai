@@ -35,9 +35,9 @@ test("production Worker upload permission is verified before D1 migrations and t
   const migration = release.indexOf("Apply reviewed migrations to production D1");
   const deploy = release.indexOf("Deploy the preflighted production Worker version");
   assert.ok(upload >= 0 && migration > upload && deploy > migration, "upload preflight must run before migration and deployment");
-  assert.match(release, /wrangler versions upload/);
+  assert.match(release, /wrangler@4\.159\.0 versions upload/);
   assert.match(release, /Workers Scripts > Write/);
   assert.match(release, /\$ErrorActionPreference = "Continue"/);
   assert.match(release, /\$uploadExitCode = \$LASTEXITCODE/);
-  assert.match(release, /wrangler versions deploy "\$\(\$env:TRANSACTRA_VERSION_ID\)@100%"/);
+  assert.match(release, /wrangler@4\.159\.0 versions deploy "\$\(\$env:TRANSACTRA_VERSION_ID\)@100%"/);
 });

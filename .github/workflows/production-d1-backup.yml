@@ -55,7 +55,7 @@ jobs:
           }
           $config = Get-Content "infra/cloudflare/wrangler.toml" -Raw
           if ($config -notmatch 'database_name\s*=\s*"transactra"' -or
-              $config -notmatch 'database_id\s*=\s*"35047d34-b8f4-4a2a-9321-fb5b5e48e409"') {
+              $config -notmatch 'database_id\s*=\s*"faf1f8b5-e029-4598-9fb0-c3cb1106d311"') {
             throw "Production D1 identity mismatch. Backup stopped."
           }
           if ($config -match 'transactra-staging|e7292f55-c90e-4d34-8b77-c97c3e5ec15a') {
@@ -96,7 +96,7 @@ jobs:
           $manifest = @{
             format = "TRANSACTRA_D1_BACKUP_V1"
             database = "transactra"
-            database_id = "35047d34-b8f4-4a2a-9321-fb5b5e48e409"
+            database_id = "faf1f8b5-e029-4598-9fb0-c3cb1106d311"
             source_commit = "$env:GITHUB_SHA"
             created_utc = [DateTime]::UtcNow.ToString("o")
             plaintext_file = "production.sql"

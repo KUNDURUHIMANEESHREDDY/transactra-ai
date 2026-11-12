@@ -43,12 +43,12 @@ test("staging Worker is isolated from production D1 and queues", () => {
   assert.deepEqual(configuredQueues, ["transactra-events-staging", "transactra-events-staging"]);
   assert.match(staging, /dead_letter_queue = "transactra-events-dlq-staging"/);
   assert.ok(!queueNames.includes("transactra-events-dlq-staging"));
-  assert.ok(!staging.includes("35047d34-b8f4-4a2a-9321-fb5b5e48e409"), "staging must not bind the production D1 database");
+  assert.ok(!staging.includes("faf1f8b5-e029-4598-9fb0-c3cb1106d311"), "staging must not bind the production D1 database");
   assert.ok(!staging.includes('queue = "transactra-events"'), "staging must not publish to the production queue");
   assert.ok(!staging.includes('queue = "transactra-events-dlq"'), "staging must not use the production dead-letter queue");
   assert.doesNotMatch(staging, /^\s*\[ai\]\s*$/m, "staging must not configure an inference binding");
   assert.doesNotMatch(deployWorkflow, /^  push:/m, "staging deploy must never run automatically on every main push");
-  assert.doesNotMatch(deployWorkflow, /35047d34-b8f4-4a2a-9321-fb5b5e48e409/, "staging deployment must never query or write production D1");
+  assert.doesNotMatch(deployWorkflow, /faf1f8b5-e029-4598-9fb0-c3cb1106d311/, "staging deployment must never query or write production D1");
   assert.match(deployWorkflow, /e7292f55-c90e-4d34-8b77-c97c3e5ec15a/);
   assert.match(deployWorkflow, /evaluation_json=\?/);
   assert.match(deployWorkflow, /decision = "accepted"/);
@@ -62,7 +62,7 @@ test("production Worker remains bound only to its production D1 and queues", () 
   assert.equal(scalar(production, "name"), "transactra-edge");
   assert.equal(scalar(production, "MEM0_ENABLED"), "true", "production Mem0 synchronization is intentionally enabled after the live outbox-to-provider acceptance test");
   assert.equal(scalar(production, "database_name"), "transactra");
-  assert.equal(scalar(production, "database_id"), "35047d34-b8f4-4a2a-9321-fb5b5e48e409");
+  assert.equal(scalar(production, "database_id"), "faf1f8b5-e029-4598-9fb0-c3cb1106d311");
   assert.equal(scalar(production, "TRANSACTRA_AGENT_EXECUTION_ENABLED"), "true", "production agent execution is enabled behind separate owner approvals and evidence gates");
   assert.equal(scalar(production, "NVIDIA_NIM_EXECUTION_ENABLED"), "true", "production NIM inference is enabled with the zero-cost guard and no fallbacks");
   const configuredQueues = [...production.matchAll(/^queue = "([^"]+)"$/gm)].map((match) => match[1]);

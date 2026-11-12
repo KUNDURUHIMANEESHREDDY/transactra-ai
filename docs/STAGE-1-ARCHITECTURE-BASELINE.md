@@ -70,7 +70,7 @@ Production planner credentials, production Telegram bot and production Worker mu
 | Resource | Live result | Interpretation |
 |---|---|---|
 | Workers | Only transactra-edge exists | transactra-edge-staging is not deployed |
-| Production D1 | transactra; ID 35047d34-b8f4-4a2a-9321-fb5b5e48e409 | Existing production database; preserve |
+| Production D1 | transactra; ID faf1f8b5-e029-4598-9fb0-c3cb1106d311 | Existing production database; preserve |
 | Staging D1 | transactra-staging; ID e7292f55-c90e-4d34-8b77-c97c3e5ec15a | Separate ID is correct; no app schema |
 | Production queue | transactra-events | One producer and one consumer on transactra-edge |
 | Production DLQ | transactra-events-dlq | Exists; no consumer attached |
