@@ -1,6 +1,6 @@
 import { searchMem0Memory, enqueueMem0Memory } from "./memory-lifecycle.mjs";
 
-const DEFAULT_REPOSITORY = "KUNDURUHIMANEESHREDDY/transactra";
+const DEFAULT_REPOSITORY = "KUNDURUHIMANEESHREDDY/transactra-ai";
 const MAX_RESEARCH_RESULTS = 3;
 const MAX_REPOSITORY_FILE_BYTES = 128 * 1024;
 const MAX_APPROVAL_PREVIEW_BYTES = 1800;
@@ -229,7 +229,7 @@ async function githubInstallationToken(env, requiredPermissions = {}) {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      repositories: ["transactra"],
+      repositories: ["transactra-ai"],
       permissions: requestedPermissions,
     }),
     redirect: "error",
