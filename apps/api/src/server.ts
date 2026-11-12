@@ -320,7 +320,10 @@ async function route(req:IncomingMessage,res:ServerResponse){
     await ensurePayPalConnectionSchema(db);
     const browserSession = createOAuthSessionToken();
     const sessionHash = hashOAuthSession(browserSession);
-    const { state } = await createOAuthState(db, telegramUserId(req), sessionHash);
+    const authenticatedOwner = getAuthenticatedUser(req);
+    if (!authenticatedOwner || authenticatedOwner !== "telegram:" + String(process.env.TELEGRAM_OWNER_ID || ""))
+      return send(res, 401, { error: "Authenticated Telegram owner identity could not be verified." });
+    const { state } = await createOAuthState(db, authenticatedOwner, sessionHash);
     const launch = new URL("/api/auth/paypal/start", getPayPalConfig().redirectUri);
     launch.searchParams.set("state", state);
     launch.searchParams.set("session", browserSession);
