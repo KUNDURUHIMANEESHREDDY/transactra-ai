@@ -6,6 +6,7 @@ import { finalizeD1NativeCompletedJobs, processD1NativeApprovedJobs } from "./d1
 import { isInnovationCycleDue, runInnovationCycle, evaluateInnovationCandidate } from "./innovation-pipeline.mjs";
 import { handleWhatsAppVerification, handleWhatsAppWebhook } from "./whatsapp-handler.mjs";
 import { processMemorySyncOutbox, searchMem0Memory, enqueueMem0Memory, forgetMem0Memory, compactOwnerMemory, getMemoryStatus, checkMem0Connectivity } from "./memory-lifecycle.mjs";
+import { isDemoTaskPrompt, runDemoTask } from "./demo-task.mjs";
 const json=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{"content-type":"application/json; charset=utf-8","cache-control":"no-store"}});
 const AI_PROVIDER = "cloudflare-workers-ai";
 const AI_MODEL = "@cf/zai-org/glm-4.7-flash";
@@ -267,6 +268,7 @@ export async function makeReply(update,env){
  const m=telegramMessage(update);if(!m||typeof m.text!=="string")return null;
  if(!m.from||String(m.from.id)!==String(env.TELEGRAM_OWNER_ID)||m.chat?.type!=="private")return null;
  const text=m.text.trim(), command=(text.split(/\s+/,1)[0]||"").split("@")[0].toLowerCase();
+ if(isDemoTaskPrompt(text))return runDemoTask(env,update,text);
  if(!command.startsWith("/")&&/^(?:please\s+)?(?:(?:can|could|would) you\s+)?(?:build|create|research|investigate|analyze|analyse|fix|update|monitor|compare|find|automate|organize|design|deploy|implement|prepare|pay|transfer|schedule|send|write|review|audit|summarize|summarise)\b/i.test(text)){
   return makeReply({...update,business_message:null,message:{...m,text:"/goal "+text}},env);
  }
