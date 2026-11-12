@@ -60,19 +60,19 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) { throw "CLOUDFLARE_API_TOKEN is missing from the transactra-staging environment." }
           $config = Get-Content "infra/cloudflare/wrangler.staging.toml" -Raw
           foreach ($required in @(
-            'name\\s*=\\s*"transactra-edge-staging"',
-            'database_name\\s*=\\s*"transactra-staging"',
-            'database_id\\s*=\\s*"312d97f4-47b4-4084-84d5-21c5fe9c5538"',
-            'TRANSACTRA_ENV\\s*=\\s*"staging"',
-            'TRANSACTRA_PLANNER_MODE\\s*=\\s*"d1-native"',
-            'TRANSACTRA_AGENT_EXECUTION_ENABLED\\s*=\\s*"false"',
-            'NVIDIA_NIM_EXECUTION_ENABLED\\s*=\\s*"false"',
-            'TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED\\s*=\\s*"false"',
-            'NVIDIA_NIM_PLANNING_ENABLED\\s*=\\s*"false"'
+            'name\s*=\s*"transactra-edge-staging"',
+            'database_name\s*=\s*"transactra-staging"',
+            'database_id\s*=\s*"312d97f4-47b4-4084-84d5-21c5fe9c5538"',
+            'TRANSACTRA_ENV\s*=\s*"staging"',
+            'TRANSACTRA_PLANNER_MODE\s*=\s*"d1-native"',
+            'TRANSACTRA_AGENT_EXECUTION_ENABLED\s*=\s*"false"',
+            'NVIDIA_NIM_EXECUTION_ENABLED\s*=\s*"false"',
+            'TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED\s*=\s*"false"',
+            'NVIDIA_NIM_PLANNING_ENABLED\s*=\s*"false"'
           )) { if ($config -notmatch $required) { throw "Staging safety check failed: $required" } }
-          if ($config -match 'database_name\\s*=\\s*"transactra"\\s*(\\r?\\n|$)' -or
-              $config -match 'database_id\\s*=\\s*"faf1f8b5-e029-4598-9fb0-c3cb1106d311"' -or
-              $config -match 'queue\\s*=\\s*"transactra-events"') {
+          if ($config -match 'database_name\s*=\s*"transactra"\s*(\r?\n|$)' -or
+              $config -match 'database_id\s*=\s*"faf1f8b5-e029-4598-9fb0-c3cb1106d311"' -or
+              $config -match 'queue\s*=\s*"transactra-events"') {
             throw "Production D1 or queue reference found in staging configuration. Refusing deployment."
           }
 
