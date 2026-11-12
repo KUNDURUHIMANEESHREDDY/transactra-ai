@@ -1,4 +1,5 @@
 name: Transactra Demo Staging Deploy
+# Deploy only when the commit message contains [deploy-demo-staging].
 
 on:
   push:
