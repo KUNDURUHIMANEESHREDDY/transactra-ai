@@ -1,17 +1,17 @@
 [Unit]
-Description=CloudPilot durable task and 48-hour project scheduler
+Description=Transactra autonomous multi-agent worker
 Wants=network-online.target
-After=network-online.target cloudpilot-worker.service
+After=network-online.target transactra-api.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
 Type=simple
-User=cloudpilot
-Group=cloudpilot
-WorkingDirectory=/opt/cloudpilot
-EnvironmentFile=/etc/cloudpilot/cloudpilot.env
-ExecStart=/usr/bin/node dist/apps/scheduler/src/main.js
+User=transactra
+Group=transactra
+WorkingDirectory=/opt/transactra
+EnvironmentFile=/etc/transactra/transactra.env
+ExecStart=/usr/bin/node dist/apps/worker/src/main.js
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=45
@@ -31,6 +31,10 @@ RestrictRealtime=yes
 ProtectProc=invisible
 ProcSubset=pid
 LimitNOFILE=65536
+# The worker reaches the Docker socket for isolated sandbox verification. ProtectSystem=strict
+# would block that socket, so the runtime directory is explicitly writable for this unit only.
+ReadWritePaths=/var/run /var/lib/docker
+SupplementaryGroups=docker
 StandardOutput=journal
 StandardError=journal
 

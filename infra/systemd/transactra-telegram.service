@@ -1,17 +1,17 @@
 [Unit]
-Description=CloudPilot authenticated control plane
+Description=Transactra Telegram polling transport disabled; production webhook is owned by transactra-edge
 Wants=network-online.target
-After=network-online.target
+After=network-online.target transactra-api.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
 Type=simple
-User=cloudpilot
-Group=cloudpilot
-WorkingDirectory=/opt/cloudpilot
-EnvironmentFile=/etc/cloudpilot/cloudpilot.env
-ExecStart=/usr/bin/node dist/apps/control-plane/src/server.js
+User=transactra
+Group=transactra
+WorkingDirectory=/opt/transactra
+EnvironmentFile=/etc/transactra/transactra.env
+ExecStart=/usr/bin/true
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
