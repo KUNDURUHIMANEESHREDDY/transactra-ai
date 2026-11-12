@@ -1,0 +1,62 @@
+name = "transactra-edge-staging"
+main = "src/index.mjs"
+compatibility_date = "2026-11-09"
+workers_dev = true
+
+# STAGING ONLY. Never copy the production D1 ID or queue names here.
+# Cloudflare Free status is owner-attested (2026-11-09); billing is not independently API-verified.
+# This ID is the separately provisioned staging database; never replace it with production.
+[[d1_databases]]
+binding = "DB"
+database_name = "transactra-staging"
+database_id = "e7292f55-c90e-4d34-8b77-c97c3e5ec15a"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "EVENTS"
+queue = "transactra-events-staging"
+
+[[queues.consumers]]
+queue = "transactra-events-staging"
+max_batch_size = 5
+max_batch_timeout = 5
+max_retries = 2
+dead_letter_queue = "transactra-events-dlq-staging"
+
+[vars]
+MEM0_ENABLED = "false"
+MEM0_MONTHLY_ADDITION_LIMIT = "10000"
+MEM0_MONTHLY_RETRIEVAL_LIMIT = "1000"
+MEM0_COMPACTION_THRESHOLD_PERCENT = "70"
+TRANSACTRA_ENV = "staging"
+TRANSACTRA_D1_DATABASE_ID = "e7292f55-c90e-4d34-8b77-c97c3e5ec15a"
+TRANSACTRA_STAGING_BASE_URL = "https://transactra-edge-staging.himaneeshreddyk.workers.dev"
+TRANSACTRA_PLANNER_MODE = "d1-native"
+TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED = "false"
+NVIDIA_NIM_PLANNING_ENABLED = "false"
+NVIDIA_NIM_MODEL = "mistralai/mistral-large-4-1t-a52b"
+NVIDIA_NIM_TIMEOUT_MS = "15000"
+TRANSACTRA_AGENT_EXECUTION_ENABLED = "false"
+NVIDIA_NIM_EXECUTION_ENABLED = "false"
+TELEGRAM_OWNER_ID = "8593447241"
+
+# NVIDIA NIM inference uses the guarded HTTPS adapter; no Cloudflare Workers AI binding or paid AI product is configured.
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+# Persist Worker logs and traces for staging incident investigation.
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1.0
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1.0
+persist = true

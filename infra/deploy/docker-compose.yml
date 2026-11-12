@@ -1,0 +1,187 @@
+name: transactra
+
+# One free always-on host. Every service talks to PostgreSQL over the compose network; the
+# host only ever sees the ports this file publishes explicitly. PostgreSQL never publishes a
+# port to the host network, so a misconfigured firewall cannot turn the database into an
+# internet service. The control plane is published on loopback only; if you also want the
+# dashboard reachable from the public internet, terminate TLS at the reverse proxy in
+# infra/nginx and change the api ports entry deliberately (see deploy/README.md).
+#
+# Usage:
+#   docker compose --env-file .env -f infra/deploy/docker-compose.yml build
+#   docker compose --env-file .env -f infra/deploy/docker-compose.yml up -d
+#   docker compose --env-file .env -f infra/deploy/docker-compose.yml logs -f telegram
+#
+# No variable here uses the compose `:?` required-marker. Compose interpolates the whole file
+# before it decides what to build or start, so a required marker on a service you did not
+# select (for example the WhatsApp webhook, behind the `whatsapp` profile) would block
+# everything. Presence is enforced by each service's own entry point instead: every app
+# refuses to start, with a named missing variable, and fails closed.
+#
+# The sandbox image is optional: when TRANSACTRA_SANDBOX_IMAGE is empty the worker still runs
+# and the isolated-verification path reports that no pinned image exists, rather than
+# pretending a change was verified.
+
+x-transactra-build: &transactra-build
+  context: ../..
+  dockerfile: infra/deploy/Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TRANSACTRA_DATABASE_NAME:-transactra}
+      POSTGRES_USER: ${TRANSACTRA_DATABASE_USER:-transactra}
+      POSTGRES_PASSWORD: ${TRANSACTRA_DATABASE_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # One-shot: applies every migration matching the migration pattern, in sorted order, in a
+  # transaction. A failed migration is a failed deploy: it exits non-zero and nothing else
+  # starts.
+  migrate:
+    image: transactra:local
+    build: *transactra-build
+    command: ["dist/apps/control-plane/src/migrate.js"]
+    environment:
+      DATABASE_URL: ${TRANSACTRA_DATABASE_INTERNAL_URL:-postgres://${TRANSACTRA_DATABASE_USER:-transactra}:${TRANSACTRA_DATABASE_PASSWORD}@postgres:5432/${TRANSACTRA_DATABASE_NAME:-transactra}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: transactra:local
+    build: *transactra-build
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${TRANSACTRA_DATABASE_INTERNAL_URL:-postgres://${TRANSACTRA_DATABASE_USER:-transactra}:${TRANSACTRA_DATABASE_PASSWORD}@postgres:5432/${TRANSACTRA_DATABASE_NAME:-transactra}}
+      HOST: 0.0.0.0
+      PORT: "8787"
+      CONTROL_PLANE_API_TOKEN: ${CONTROL_PLANE_API_TOKEN}
+      CONTROL_PLANE_APPROVAL_TOKEN: ${CONTROL_PLANE_APPROVAL_TOKEN}
+      TRANSACTRA_OWNER_ID: ${TRANSACTRA_OWNER_ID}
+    ports:
+      - "127.0.0.1:8787:8787"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/health/live >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Long polling means the Telegram transport needs only outbound HTTPS: no public port, no
+  # domain, no certificate. This is the channel to run first on a free host.
+  telegram:
+    image: transactra:local
+    build: *transactra-build
+    command: ["dist/apps/telegram/src/main.js"]
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${TRANSACTRA_DATABASE_INTERNAL_URL:-postgres://${TRANSACTRA_DATABASE_USER:-transactra}:${TRANSACTRA_DATABASE_PASSWORD}@postgres:5432/${TRANSACTRA_DATABASE_NAME:-transactra}}
+      CONTROL_PLANE_URL: http://api:8787
+      CONTROL_PLANE_API_TOKEN: ${CONTROL_PLANE_API_TOKEN}
+      CONTROL_PLANE_APPROVAL_TOKEN: ${CONTROL_PLANE_APPROVAL_TOKEN}
+      TRANSACTRA_OWNER_ID: ${TRANSACTRA_OWNER_ID}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS}
+    restart: unless-stopped
+
+  scheduler:
+    image: transactra:local
+    build: *transactra-build
+    command: ["dist/apps/scheduler/src/main.js"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${TRANSACTRA_DATABASE_INTERNAL_URL:-postgres://${TRANSACTRA_DATABASE_USER:-transactra}:${TRANSACTRA_DATABASE_PASSWORD}@postgres:5432/${TRANSACTRA_DATABASE_NAME:-transactra}}
+      TRANSACTRA_OWNER_ID: ${TRANSACTRA_OWNER_ID}
+      TRANSACTRA_CYCLE_INTERVAL_MS: ${TRANSACTRA_CYCLE_INTERVAL_MS:-900000}
+    restart: unless-stopped
+
+  worker:
+    image: transactra:local
+    build: *transactra-build
+    command: ["dist/apps/worker/src/main.js"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${TRANSACTRA_DATABASE_INTERNAL_URL:-postgres://${TRANSACTRA_DATABASE_USER:-transactra}:${TRANSACTRA_DATABASE_PASSWORD}@postgres:5432/${TRANSACTRA_DATABASE_NAME:-transactra}}
+      TRANSACTRA_OWNER_ID: ${TRANSACTRA_OWNER_ID}
+      TRANSACTRA_WORKER_ID: ${TRANSACTRA_WORKER_ID:-transactra-worker-1}
+      TRANSACTRA_SANDBOX_IMAGE: ${TRANSACTRA_SANDBOX_IMAGE}
+      TRANSACTRA_EVOLUTION_REPOSITORY: ${TRANSACTRA_EVOLUTION_REPOSITORY:-KUNDURUHIMANEESHREDDY/transactra}
+      # Provider and GitHub credentials are optional per feature; each remote path fails
+      # closed and reports the missing credential rather than degrading to a fake result.
+      NVIDIA_NIM_BASE_URL: ${NVIDIA_NIM_BASE_URL}
+      NVIDIA_NIM_API_KEY: ${NVIDIA_NIM_API_KEY}
+      NVIDIA_NIM_MODEL: ${NVIDIA_NIM_MODEL}
+      NVIDIA_NIM_FREE_TIER_VERIFIED_AT: ${NVIDIA_NIM_FREE_TIER_VERIFIED_AT}
+      NVIDIA_NIM_MONTHLY_REQUEST_CAP: ${NVIDIA_NIM_MONTHLY_REQUEST_CAP}
+      NVIDIA_NIM_MONTHLY_TOKEN_CAP: ${NVIDIA_NIM_MONTHLY_TOKEN_CAP}
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      TAVILY_PAYG_DISABLED_CONFIRMED: ${TAVILY_PAYG_DISABLED_CONFIRMED:-false}
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY}
+      GITHUB_REPOSITORY_ALLOWLIST: ${GITHUB_REPOSITORY_ALLOWLIST}
+      GITHUB_REPOSITORY_CREATE_TOKEN: ${GITHUB_REPOSITORY_CREATE_TOKEN}
+      MONTHLY_SPEND_LIMIT_INR: ${MONTHLY_SPEND_LIMIT_INR:-0}
+    volumes:
+      # The sandbox needs the Docker CLI and its socket. This is the one privilege in the
+      # stack: treat this host as a single-tenant appliance, never expose it to untrusted
+      # networks or users, and read infra/deploy/README.md before enabling it.
+      - ${TRANSACTRA_DOCKER_SOCKET:-/var/run/docker.sock}:${TRANSACTRA_DOCKER_SOCKET_TARGET:-/var/run/docker.sock}:ro
+    restart: unless-stopped
+
+  # A signed webhook must be reachable from Meta, so this service is behind a profile and is
+  # published on loopback only: put a TLS reverse proxy in front of it before enabling it.
+  whatsapp:
+    image: transactra:local
+    build: *transactra-build
+    command: ["dist/apps/whatsapp/src/main.js"]
+    profiles: ["whatsapp"]
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${TRANSACTRA_DATABASE_INTERNAL_URL:-postgres://${TRANSACTRA_DATABASE_USER:-transactra}:${TRANSACTRA_DATABASE_PASSWORD}@postgres:5432/${TRANSACTRA_DATABASE_NAME:-transactra}}
+      CONTROL_PLANE_URL: http://api:8787
+      CONTROL_PLANE_API_TOKEN: ${CONTROL_PLANE_API_TOKEN}
+      CONTROL_PLANE_APPROVAL_TOKEN: ${CONTROL_PLANE_APPROVAL_TOKEN}
+      TRANSACTRA_OWNER_ID: ${TRANSACTRA_OWNER_ID}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
+      WHATSAPP_GRAPH_API_VERSION: ${WHATSAPP_GRAPH_API_VERSION:-v21.0}
+      WHATSAPP_ALLOWED_USERS: ${WHATSAPP_ALLOWED_USERS}
+      WHATSAPP_WEBHOOK_PATH: ${WHATSAPP_WEBHOOK_PATH:-/webhook}
+      WHATSAPP_PORT: "3001"
+    ports:
+      - "127.0.0.1:3001:3001"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+
+# A normal bridge network, NOT an `internal: true` network: every service needs real outbound
+# HTTPS (Telegram long polling, NVIDIA NIM, Tavily, GitHub). Exposure to the outside world is
+# controlled entirely by the explicit `ports:` entries above, which publish loopback only.
+networks:
+  default:
+    name: transactra

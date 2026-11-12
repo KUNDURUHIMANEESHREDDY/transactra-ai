@@ -1,0 +1,285 @@
+name: Transactra Staging Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "bootstrap deploy or execute one D1-approved staging action"
+        required: true
+        type: choice
+        options:
+          - bootstrap
+          - approved_action
+        default: bootstrap
+      task_id:
+        description: "D1-native task ID (required for approved_action)."
+        required: false
+        type: string
+      step_id:
+        description: "Approved orchestrator step ID (required for approved_action)."
+        required: false
+        type: string
+      approval_id:
+        description: "Single-use D1 step approval UUID (required for approved_action)."
+        required: false
+        type: string
+      action_hash:
+        description: "SHA-256 hash of the exact approved action (required for approved_action)."
+        required: false
+        type: string
+      approval_database_id:
+        description: "Transactra D1 database ID containing the immutable approval."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transactra-staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: [self-hosted, Windows, X64]
+    environment: transactra-staging
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+    env:
+      CLOUDFLARE_ACCOUNT_ID: e15f135fd5ae49e30f892777aebec675
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_STAGING_BOT_ID: ${{ vars.TELEGRAM_STAGING_BOT_ID }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+      TELEGRAM_OWNER_ID: "8593447241"
+      CLOUDFLARE_STAGING_BASE_URL: https://transactra-edge-staging.himaneeshreddyk.workers.dev
+      TRANSACTRA_DEPLOY_MODE: ${{ inputs.mode || 'bootstrap' }}
+      TRANSACTRA_APPROVAL_TASK_ID: ${{ inputs.task_id }}
+      TRANSACTRA_APPROVAL_STEP_ID: ${{ inputs.step_id }}
+      TRANSACTRA_APPROVAL_ID: ${{ inputs.approval_id }}
+      TRANSACTRA_APPROVAL_HASH: ${{ inputs.action_hash }}
+      TRANSACTRA_APPROVAL_DATABASE_ID: ${{ inputs.approval_database_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mint short-lived repository-scoped GitHub App token
+        id: github-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GITHUB_APP_ID }}
+          private-key: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+          installation-id: ${{ secrets.GITHUB_APP_INSTALLATION_ID }}
+          owner: KUNDURUHIMANEESHREDDY
+          repositories: transactra
+          permission-contents: write
+          permission-actions: write
+
+      - name: Export ephemeral GitHub token to staging job
+        env:
+          APP_TOKEN: ${{ steps.github-app-token.outputs.token }}
+        run: |
+          $line = "TRANSACTRA_GITHUB_TOKEN=$env:APP_TOKEN" + [Environment]::NewLine
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, $line, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Validate staging Telegram bot credential before deployment
+        run: |
+          $botToken = $env:TELEGRAM_BOT_TOKEN.Trim()
+          try {
+            $response = Invoke-WebRequest -Uri ("https://api.telegram.org/bot" + $botToken + "/getMe") -Method Get -UseBasicParsing -TimeoutSec 20
+            $status = [int]$response.StatusCode
+            $bot = [string]$response.Content | ConvertFrom-Json
+          } catch {
+            $status = 0
+            if ($_.Exception.Response) { try { $status = [int]$_.Exception.Response.StatusCode } catch { $status = 0 } }
+            throw "Telegram staging bot credential validation failed (HTTP $status). No staging migrations or Worker deployment were attempted."
+          }
+          if ($bot.ok -ne $true -or $bot.result.is_bot -ne $true -or [string]$bot.result.id -ne [string]$env:TELEGRAM_STAGING_BOT_ID) {
+            throw "Telegram token identity does not match the configured dedicated staging bot. No staging migrations or Worker deployment were attempted."
+          }
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Require isolated staging configuration and credentials
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) { throw "Add CLOUDFLARE_API_TOKEN to the transactra-staging GitHub environment secrets." }
+          if ([string]::IsNullOrWhiteSpace($env:TRANSACTRA_GITHUB_TOKEN)) { throw "GitHub App installation-token minting failed; check the staging GitHub App secrets and repository permissions." }
+          if ([string]::IsNullOrWhiteSpace($env:TELEGRAM_BOT_TOKEN) -or [string]::IsNullOrWhiteSpace($env:TELEGRAM_WEBHOOK_SECRET)) { throw "Add the dedicated staging Telegram bot token and webhook secret." }
+          $botId = 0L
+          if (-not [long]::TryParse($env:TELEGRAM_STAGING_BOT_ID, [ref]$botId) -or $botId -le 0) { throw "Set TELEGRAM_STAGING_BOT_ID to the dedicated staging bot numeric ID." }
+          $stagingUri = [Uri]$env:CLOUDFLARE_STAGING_BASE_URL
+          if ($stagingUri.Scheme -ne "https" -or $stagingUri.Host -notmatch "workers\.dev$") { throw "Staging URL must be an HTTPS workers.dev URL." }
+          $config = Get-Content "infra/cloudflare/wrangler.staging.toml" -Raw
+          foreach ($required in @(
+            'name\s*=\s*"transactra-edge-staging"',
+            'database_name\s*=\s*"transactra-staging"',
+            'database_id\s*=\s*"e7292f55-c90e-4d34-8b77-c97c3e5ec15a"',
+            'TRANSACTRA_D1_DATABASE_ID\s*=\s*"e7292f55-c90e-4d34-8b77-c97c3e5ec15a"',
+            'queue\s*=\s*"transactra-events-staging"',
+            'TRANSACTRA_PLANNER_MODE\s*=\s*"d1-native"',
+            'TRANSACTRA_AGENT_EXECUTION_ENABLED\s*=\s*"false"',
+            'NVIDIA_NIM_EXECUTION_ENABLED\s*=\s*"false"',
+            'TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED\s*=\s*"false"',
+            'NVIDIA_NIM_PLANNING_ENABLED\s*=\s*"false"'
+          )) { if ($config -notmatch $required) { throw "Staging config safety check failed on $required. Refusing deployment." } }
+          if ($config -match 'NVIDIA_NIM_FREE_TIER_VERIFIED_AT' -or $config -match 'database_name\s*=\s*"transactra"\s*(\r?\n|$)' -or $config -match 'queue\s*=\s*"transactra-events"\s*(\r?\n|$)') { throw "Staging config contains an unverified inference marker or production resource reference." }
+          if ($env:TRANSACTRA_DEPLOY_MODE -notin @("bootstrap","approved_action")) { throw "Unknown staging deployment mode." }
+
+      - name: Verify consumed owner approval in staging D1
+        id: approval
+        if: inputs.mode == 'approved_action'
+        run: |
+          if ($env:GITHUB_REF -ne "refs/heads/main") { throw "Staging deployment must be dispatched from main." }
+          $taskId = $env:TRANSACTRA_APPROVAL_TASK_ID
+          $stepId = $env:TRANSACTRA_APPROVAL_STEP_ID
+          $approvalId = $env:TRANSACTRA_APPROVAL_ID
+          $actionHash = $env:TRANSACTRA_APPROVAL_HASH
+          $databaseId = $env:TRANSACTRA_APPROVAL_DATABASE_ID
+          if ($taskId -notmatch '^tg-[A-Za-z0-9_-]{1,80}$' -or $stepId -notmatch '^step-[1-8]$' -or
+              $approvalId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' -or
+              $actionHash -notmatch '^[0-9a-fA-F]{64}$' -or
+              $databaseId -ne "e7292f55-c90e-4d34-8b77-c97c3e5ec15a") {
+            throw "Approved staging dispatch metadata failed validation."
+          }
+          $sql = "SELECT id,task_id,step_id,owner_id,status,action_hash,action_json,expires_at,consumed_at FROM orchestrator_step_approvals WHERE id = ?"
+          $body = @{ sql = $sql; params = @($approvalId) } | ConvertTo-Json -Compress -Depth 8
+          $uri = "https://api.cloudflare.com/client/v4/accounts/" + $env:CLOUDFLARE_ACCOUNT_ID + "/d1/database/" + $databaseId + "/query"
+          $headers = @{ Authorization = "Bearer " + $env:CLOUDFLARE_API_TOKEN }
+          $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -ContentType "application/json" -Body $body -TimeoutSec 25
+          if ($response.success -ne $true) { throw "Cloudflare D1 approval lookup failed; staging deployment is blocked." }
+          $rows = @($response.result[0].results)
+          if ($rows.Count -ne 1) { throw "The requested immutable step approval does not exist in staging D1." }
+          $row = $rows[0]
+          if ([string]$row.task_id -ne $taskId -or [string]$row.step_id -ne $stepId -or
+              [string]$row.owner_id -ne "8593447241" -or [string]$row.status -ne "consumed" -or
+              [string]$row.action_hash -ne $actionHash -or [string]::IsNullOrWhiteSpace([string]$row.consumed_at)) {
+            throw "D1 approval is not a consumed owner approval for this exact staging action."
+          }
+          if ([DateTimeOffset]::Parse([string]$row.expires_at) -le [DateTimeOffset]::UtcNow) { throw "The owner approval expired before staging deployment." }
+          $action = ConvertFrom-Json -InputObject ([string]$row.action_json)
+          if ($action.tool -ne "cloudflare_staging" -or $action.input.environment -ne "staging" -or $action.input.operation -ne "deploy" -or $action.risk -ne "high") {
+            throw "The immutable approved action is not a high-risk staging deployment."
+          }
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try { $computedHash = [Convert]::ToHexString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes([string]$row.action_json))).ToLowerInvariant() }
+          finally { $sha.Dispose() }
+          if ($computedHash -ne $actionHash.ToLowerInvariant()) { throw "The D1 action JSON does not match its approved SHA-256 hash." }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "verified=true" -Encoding ASCII
+          Write-Host "Verified the consumed owner-approved staging action in the isolated staging D1 database."
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run build, regression, Cloudflare and security gates
+        run: |
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { throw "Application tests failed." }
+          pnpm test:cloudflare-nim
+          if ($LASTEXITCODE -ne 0) { throw "Cloudflare safety tests failed." }
+          pnpm audit --audit-level high
+          if ($LASTEXITCODE -ne 0) { throw "Dependency audit failed." }
+          node scripts/security-gate.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Secret scan failed." }
+
+      - name: Apply migrations to staging D1 only
+        run: |
+          pnpm dlx wrangler@4 d1 migrations apply transactra-staging --remote --config infra/cloudflare/wrangler.staging.toml
+          if ($LASTEXITCODE -ne 0) { throw "Staging D1 migration failed; Worker deployment stopped." }
+
+      - name: Deploy staging Worker only
+        run: |
+          pnpm dlx wrangler@4 deploy --config infra/cloudflare/wrangler.staging.toml
+          if ($LASTEXITCODE -ne 0) { throw "Staging Worker deployment failed." }
+
+      - name: Install staging Worker secrets
+        env:
+          GITHUB_APP_ID: ${{ secrets.GITHUB_APP_ID }}
+          GITHUB_APP_INSTALLATION_ID: ${{ secrets.GITHUB_APP_INSTALLATION_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GITHUB_APP_PRIVATE_KEY }}
+        run: node infra/cloudflare/scripts/install-staging-secrets.mjs
+
+      - name: Verify staging health and readiness
+        run: |
+          $base = $env:CLOUDFLARE_STAGING_BASE_URL.TrimEnd("/")
+          foreach ($path in @("/health","/ready")) {
+            $response = Invoke-WebRequest -Uri ($base + $path) -Method Get -UseBasicParsing -TimeoutSec 25
+            if ([int]$response.StatusCode -ne 200) { throw "Staging $path did not return HTTP 200." }
+            $data = [string]$response.Content | ConvertFrom-Json
+            if ($data.ok -ne $true) { throw "Staging $path did not report ok=true." }
+            if ($path -eq "/ready" -and ($data.ready -ne $true -or $data.planner -ne "d1-native" -or $data.inference -ne "disabled")) {
+              throw "Staging readiness must report D1-native planner and disabled inference."
+            }
+          }
+
+      - name: Register and verify dedicated staging Telegram webhook
+        run: |
+          $base = $env:CLOUDFLARE_STAGING_BASE_URL.TrimEnd("/")
+          $expected = "$base/telegram/webhook"
+          $botToken = $env:TELEGRAM_BOT_TOKEN.Trim()
+          $webhookSecret = $env:TELEGRAM_WEBHOOK_SECRET.Trim()
+          if ($webhookSecret.Length -lt 1 -or $webhookSecret.Length -gt 256 -or $webhookSecret -notmatch '^[A-Za-z0-9_-]+$') { throw "Staging webhook secret format is invalid." }
+          $setUri = "https://api.telegram.org/bot" + $botToken + "/setWebhook"
+          $infoUri = "https://api.telegram.org/bot" + $botToken + "/getWebhookInfo"
+          $body = @{ url = $expected; secret_token = $webhookSecret; allowed_updates = @("message"); drop_pending_updates = $false } | ConvertTo-Json -Compress
+          $set = Invoke-RestMethod -Uri $setUri -Method Post -ContentType "application/json" -Body $body -TimeoutSec 20
+          if ($set.ok -ne $true) { throw "Telegram rejected staging webhook registration." }
+          $info = Invoke-RestMethod -Uri $infoUri -Method Get -TimeoutSec 20
+          if ($info.ok -ne $true -or $info.result.url -ne $expected) { throw "Staging Telegram webhook URL verification failed." }
+
+      - name: Run live staging Telegram task acceptance tests
+        run: |
+          node infra/cloudflare/scripts/staging-acceptance.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Live staging Telegram acceptance failed; production remains untouched." }
+
+      - name: Record successful approved staging action in D1
+        if: success() && steps.approval.outputs.verified == 'true'
+        run: |
+          $now = [DateTimeOffset]::UtcNow.ToString("o")
+          $taskId = $env:TRANSACTRA_APPROVAL_TASK_ID
+          $stepId = $env:TRANSACTRA_APPROVAL_STEP_ID
+          $databaseId = $env:TRANSACTRA_APPROVAL_DATABASE_ID
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $resultText = @{ environment = "staging"; workflow_run_url = $runUrl; commit = $env:GITHUB_SHA; acceptance = "passed"; verified_at = $now } | ConvertTo-Json -Compress -Depth 8
+          $evaluationJson = @{ decision = "accepted"; accepted = $true; rationale = "The staging deployment workflow completed its health, readiness, migration and acceptance checks; the workflow run URL and commit are persisted as evidence."; evidence_required = @() } | ConvertTo-Json -Compress -Depth 8
+          $headers = @{ Authorization = "Bearer " + $env:CLOUDFLARE_API_TOKEN }
+          $uri = "https://api.cloudflare.com/client/v4/accounts/" + $env:CLOUDFLARE_ACCOUNT_ID + "/d1/database/" + $databaseId + "/query"
+          $sql = "UPDATE orchestrator_step_runs SET status='succeeded',lease_token=NULL,lease_until=NULL,result_text=?,evaluation_json=?,last_error=NULL,completed_at=?,updated_at=? WHERE task_id=? AND step_id=? AND tool='cloudflare_staging' AND status IN ('queued','retry','leased','needs_review')"
+          $body = @{ sql = $sql; params = @($resultText,$evaluationJson,$now,$now,$taskId,$stepId) } | ConvertTo-Json -Compress -Depth 8
+          $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -ContentType "application/json" -Body $body -TimeoutSec 25
+          if ($response.success -ne $true) { throw "Could not persist the verified staging deployment result to D1." }
+          $jobBody = @{ sql = "UPDATE orchestrator_jobs SET status='blocked',lease_token=NULL,lease_until=NULL,last_error=NULL,updated_at=? WHERE task_id=?"; params = @($now,$taskId) } | ConvertTo-Json -Compress
+          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -ContentType "application/json" -Body $jobBody -TimeoutSec 25 | Out-Null
+          $eventSql = "INSERT INTO orchestrator_events (job_id,task_id,event_type,detail,created_at) SELECT id,task_id,'orchestrator.staging_deployment_verified',?,? FROM orchestrator_jobs WHERE task_id=? AND NOT EXISTS (SELECT 1 FROM orchestrator_events WHERE task_id=? AND event_type='orchestrator.staging_deployment_verified')"
+          $eventBody = @{ sql = $eventSql; params = @($resultText,$now,$taskId,$taskId) } | ConvertTo-Json -Compress
+          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -ContentType "application/json" -Body $eventBody -TimeoutSec 25 | Out-Null
+          Write-Host "Staging deployment and acceptance result recorded in staging D1."
+
+      - name: Hold failed approved staging action for owner review
+        if: failure() && steps.approval.outputs.verified == 'true'
+        run: |
+          $now = [DateTimeOffset]::UtcNow.ToString("o")
+          $taskId = $env:TRANSACTRA_APPROVAL_TASK_ID
+          $stepId = $env:TRANSACTRA_APPROVAL_STEP_ID
+          $databaseId = $env:TRANSACTRA_APPROVAL_DATABASE_ID
+          $reason = "Staging deployment or acceptance failed after approval consumption; automatic replay is disabled. Inspect this GitHub Actions run."
+          $headers = @{ Authorization = "Bearer " + $env:CLOUDFLARE_API_TOKEN }
+          $uri = "https://api.cloudflare.com/client/v4/accounts/" + $env:CLOUDFLARE_ACCOUNT_ID + "/d1/database/" + $databaseId + "/query"
+          $stepBody = @{ sql = "UPDATE orchestrator_step_runs SET status='needs_review',lease_token=NULL,lease_until=NULL,last_error=?,updated_at=? WHERE task_id=? AND step_id=?"; params = @($reason,$now,$taskId,$stepId) } | ConvertTo-Json -Compress
+          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -ContentType "application/json" -Body $stepBody -TimeoutSec 25 | Out-Null
+          $jobBody = @{ sql = "UPDATE orchestrator_jobs SET status='blocked',lease_token=NULL,lease_until=NULL,last_error=?,updated_at=? WHERE task_id=?"; params = @($reason,$now,$taskId) } | ConvertTo-Json -Compress
+          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -ContentType "application/json" -Body $jobBody -TimeoutSec 25 | Out-Null
+          $eventBody = @{ sql = "INSERT INTO orchestrator_events (job_id,task_id,event_type,detail,created_at) SELECT id,task_id,'orchestrator.staging_deployment_failed',?,? FROM orchestrator_jobs WHERE task_id=?"; params = @($reason,$now,$taskId) } | ConvertTo-Json -Compress
+          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -ContentType "application/json" -Body $eventBody -TimeoutSec 25 | Out-Null
+          Write-Host "Failed staging action held for owner review; its consumed approval cannot be replayed."

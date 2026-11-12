@@ -1,0 +1,64 @@
+name = "transactra-edge"
+main = "src/index.mjs"
+compatibility_date = "2026-11-09"
+workers_dev = true
+
+# Cloudflare resources provisioned for Transactra. No credentials are stored here.
+[[d1_databases]]
+binding = "DB"
+database_name = "transactra"
+database_id = "35047d34-b8f4-4a2a-9321-fb5b5e48e409"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+binding = "EVENTS"
+queue = "transactra-events"
+
+[[queues.consumers]]
+queue = "transactra-events"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "transactra-events-dlq"
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+MEM0_ENABLED = "true"
+MEM0_MONTHLY_ADDITION_LIMIT = "10000"
+MEM0_MONTHLY_RETRIEVAL_LIMIT = "1000"
+MEM0_COMPACTION_THRESHOLD_PERCENT = "70"
+TRANSACTRA_ENV = "production"
+TRANSACTRA_D1_DATABASE_ID = "35047d34-b8f4-4a2a-9321-fb5b5e48e409"
+TRANSACTRA_PLANNER_MODE = "d1-native"
+TRANSACTRA_AGENT_EXECUTION_ENABLED = "true"
+TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED = "true"
+NVIDIA_NIM_PLANNING_ENABLED = "true"
+TELEGRAM_OWNER_ID = "8593447241"
+# The API key remains a Worker secret and is never committed.
+NVIDIA_NIM_FREE_TIER_VERIFIED_AT = "2026-11-10T04:35:59.866Z"
+NVIDIA_NIM_MODEL = "stepfun-ai/step-5-preview"
+NVIDIA_NIM_FALLBACK_MODELS = ""
+NVIDIA_NIM_ZERO_COST_LIMIT_INR = "0"
+NVIDIA_NIM_EXECUTION_ENABLED = "true"
+NVIDIA_NIM_TIMEOUT_MS = "120000"
+
+[ai]
+binding = "AI"
+
+# Keep production observability under source control; match the live Worker settings.
+[observability]
+enabled = true
+head_sampling_rate = 1.0
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1.0
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1.0
+persist = true

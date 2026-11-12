@@ -1,0 +1,137 @@
+name: Transactra Production D1 Backup
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_backup:
+        description: "Type BACKUP to export production D1. Export temporarily makes D1 unavailable while Cloudflare creates the dump; no schema or row changes are applied."
+        required: true
+        type: string
+        default: "STOP"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transactra-production-d1-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_backup == 'BACKUP'
+    runs-on: [self-hosted, Windows, X64, transactra]
+    environment: transactra-production
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+    env:
+      CLOUDFLARE_ACCOUNT_ID: e15f135fd5ae49e30f892777aebec675
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_BACKUP_TOKEN }}
+      D1_BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.D1_BACKUP_ENCRYPTION_PASSPHRASE }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Validate protected backup credentials and production target
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) {
+            throw "Set CLOUDFLARE_D1_BACKUP_TOKEN (account D1 Write only) in the protected transactra-production environment."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:D1_BACKUP_ENCRYPTION_PASSPHRASE) -or $env:D1_BACKUP_ENCRYPTION_PASSPHRASE.Length -lt 32) {
+            throw "Set D1_BACKUP_ENCRYPTION_PASSPHRASE as a GitHub environment secret (minimum 32 characters). Never commit or paste it into chat."
+          }
+          $config = Get-Content "infra/cloudflare/wrangler.toml" -Raw
+          if ($config -notmatch 'database_name\s*=\s*"transactra"' -or
+              $config -notmatch 'database_id\s*=\s*"35047d34-b8f4-4a2a-9321-fb5b5e48e409"') {
+            throw "Production D1 identity mismatch. Backup stopped."
+          }
+          if ($config -match 'transactra-staging|e7292f55-c90e-4d34-8b77-c97c3e5ec15a') {
+            throw "Staging database reference found in production config. Backup stopped."
+          }
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Export production D1 without applying changes
+        run: |
+          pnpm exec wrangler d1 export transactra --remote --output production.sql --config infra/cloudflare/wrangler.toml
+          if ($LASTEXITCODE -ne 0) { throw "Production D1 export failed." }
+          if (-not (Test-Path "production.sql") -or (Get-Item "production.sql").Length -le 0) {
+            throw "D1 export is missing or empty."
+          }
+
+      - name: Encrypt export and create integrity manifest
+        run: |
+          node scripts/d1-backup-crypto.mjs encrypt production.sql production.sql.enc
+          if ($LASTEXITCODE -ne 0) { throw "D1 backup encryption failed." }
+          $plainHash = (node scripts/d1-backup-crypto.mjs sha256 production.sql | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $plainHash -notmatch '^[a-f0-9]{64}$') { throw "Could not calculate plaintext SHA-256." }
+          $encryptedHash = (node scripts/d1-backup-crypto.mjs sha256 production.sql.enc | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $encryptedHash -notmatch '^[a-f0-9]{64}$') { throw "Could not calculate encrypted SHA-256." }
+          try {
+            node scripts/d1-backup-crypto.mjs decrypt production.sql.enc backup-verification.sql $plainHash
+            if ($LASTEXITCODE -ne 0) { throw "Encrypted backup round-trip verification failed." }
+            $verifiedHash = (node scripts/d1-backup-crypto.mjs sha256 backup-verification.sql | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $verifiedHash -ne $plainHash) { throw "Backup round-trip checksum mismatch." }
+            node scripts/d1-restore-drill.mjs backup-verification.sql
+            if ($LASTEXITCODE -ne 0) { throw "Isolated production D1 restore rehearsal failed." }
+          }
+          finally {
+            # Never leave decrypted production data behind on the persistent runner.
+            if (Test-Path "backup-verification.sql") { Remove-Item "backup-verification.sql" -Force }
+          }
+          $manifest = @{
+            format = "TRANSACTRA_D1_BACKUP_V1"
+            database = "transactra"
+            database_id = "35047d34-b8f4-4a2a-9321-fb5b5e48e409"
+            source_commit = "$env:GITHUB_SHA"
+            created_utc = [DateTime]::UtcNow.ToString("o")
+            plaintext_file = "production.sql"
+            plaintext_sha256 = $plainHash
+            encrypted_file = "production.sql.enc"
+            encrypted_sha256 = $encryptedHash
+            encryption = "AES-256-GCM; scrypt N=131072,r=8,p=1"
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path "manifest.json" -Encoding utf8
+          Remove-Item "production.sql" -Force
+
+      - name: Upload encrypted backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transactra-production-d1-backup-${{ github.run_id }}
+          path: |
+            production.sql.enc
+            manifest.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Report backup metadata (no secrets)
+        run: |
+          $manifest = Get-Content "manifest.json" -Raw | ConvertFrom-Json
+          Write-Host "Encrypted production D1 artifact uploaded."
+          Write-Host "Database: $($manifest.database)"
+          Write-Host "Source commit: $($manifest.source_commit)"
+          Write-Host "Plaintext SHA-256: $($manifest.plaintext_sha256)"
+          Write-Host "Encrypted SHA-256: $($manifest.encrypted_sha256)"
+          Write-Host "Retention: 30 days. This artifact is not a permanent archival backup."
+
+      - name: Remove local backup files
+        if: always()
+        run: |
+          @("production.sql", "backup-verification.sql", "production.sql.enc", "manifest.json") | ForEach-Object {
+            if (Test-Path $_) { Remove-Item $_ -Force }
+          }

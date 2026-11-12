@@ -1,0 +1,183 @@
+name: Transactra Production Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: "Type DEPLOY to authorize the production release workflow."
+        required: true
+        type: string
+        default: "STOP"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transactra-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_production == 'DEPLOY'
+    runs-on: [self-hosted, Windows, X64, transactra]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+    steps:
+      - name: Checkout protected main
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run complete CI and security gates
+        run: |
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { throw "Build, typecheck or regression tests failed." }
+          pnpm test:cloudflare-nim
+          if ($LASTEXITCODE -ne 0) { throw "Cloudflare safety tests failed." }
+          pnpm audit --audit-level high
+          if ($LASTEXITCODE -ne 0) { throw "Dependency audit failed." }
+          node scripts/security-gate.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Secret scan failed." }
+
+      - name: Enforce production-only, NVIDIA planning and approval-gated execution release configuration
+        run: |
+          $config = Get-Content "infra/cloudflare/wrangler.toml" -Raw
+          foreach ($required in @(
+            'name\s*=\s*"transactra-edge"',
+            'database_name\s*=\s*"transactra"',
+            'database_id\s*=\s*"35047d34-b8f4-4a2a-9321-fb5b5e48e409"',
+            'TRANSACTRA_ENV\s*=\s*"production"',
+            'TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED\s*=\s*"true"',
+            'NVIDIA_NIM_PLANNING_ENABLED\s*=\s*"true"',
+            'TRANSACTRA_AGENT_EXECUTION_ENABLED\s*=\s*"true"',
+            'NVIDIA_NIM_EXECUTION_ENABLED\s*=\s*"true"'
+          )) {
+            if ($config -notmatch $required) { throw "Production safety gate failed: $required" }
+          }
+          if ($config -match 'transactra-staging|e7292f55-c90e-4d34-8b77-c97c3e5ec15a') {
+            throw "Non-production resource found. Refusing release."
+          }
+
+  deploy-production:
+    needs: verify
+    if: github.ref == 'refs/heads/main' && inputs.confirm_production == 'DEPLOY'
+    runs-on: [self-hosted, Windows, X64, transactra]
+    environment:
+      name: transactra-production
+      url: https://transactra-edge.himaneeshreddyk.workers.dev
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_PRODUCTION_BASE_URL: https://transactra-edge.himaneeshreddyk.workers.dev
+    steps:
+      - name: Checkout approved main revision
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Require explicit production credentials and resource identity
+        env:
+          CLOUDFLARE_WORKERS_DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_DEPLOY_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_API_TOKEN)) {
+            throw "Add CLOUDFLARE_API_TOKEN with D1 migration permissions to the protected transactra-production environment."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CLOUDFLARE_WORKERS_DEPLOY_TOKEN)) {
+            throw "Add CLOUDFLARE_WORKERS_DEPLOY_TOKEN to the protected transactra-production environment. This is a separate secret from CLOUDFLARE_API_TOKEN and must use a Cloudflare API token with Account > Workers Scripts > Edit permission, scoped to the Transactra production account."
+          }
+          $uri = [Uri]$env:CLOUDFLARE_PRODUCTION_BASE_URL
+          if ($uri.Scheme -ne "https" -or $uri.Host -notmatch "workers\.dev$") {
+            throw "Production URL must be HTTPS on workers.dev."
+          }
+          $config = Get-Content "infra/cloudflare/wrangler.toml" -Raw
+          if ($config -notmatch 'name\s*=\s*"transactra-edge"' -or
+              $config -notmatch 'database_name\s*=\s*"transactra"' -or
+              $config -notmatch 'database_id\s*=\s*"35047d34-b8f4-4a2a-9321-fb5b5e48e409"' -or
+              $config -notmatch 'TRANSACTRA_ENV\s*=\s*"production"') {
+            throw "Production resource identity check failed."
+          }
+          if ($config -match 'transactra-staging|e7292f55-c90e-4d34-8b77-c97c3e5ec15a') {
+            throw "Staging resource found in production config. Refusing deployment."
+          }
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Upload production Worker version as a permission preflight
+        id: upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_DEPLOY_TOKEN }}
+        run: |
+          # Wrangler emits a non-fatal legacy-script warning on stderr; PowerShell 5.1 treats native stderr as an error record under the runner default Stop preference.
+          $ErrorActionPreference = "Continue"
+          $identity = pnpm exec wrangler whoami 2>&1 | Out-String
+          $identityExitCode = $LASTEXITCODE
+          if ($identityExitCode -ne 0) { throw "Cloudflare Worker deploy token authentication failed: $identity" }
+          if ($identity -notmatch "e15f135fd5ae49e30f892777aebec675") {
+            throw "Worker deploy token is not scoped to the Transactra production account. Refusing migrations and deployment."
+          }
+          $releaseMessage = "Transactra production release $env:GITHUB_SHA"
+          $uploadOutput = pnpm exec wrangler versions upload --config infra/cloudflare/wrangler.toml --message $releaseMessage 2>&1 | Out-String
+          $uploadExitCode = $LASTEXITCODE
+          if ($uploadExitCode -ne 0) {
+            throw "Cloudflare refused the production Worker version upload. Grant this token Account > Workers Scripts > Write on the Transactra production account. D1 migrations were not run. $uploadOutput"
+          }
+          Write-Host $uploadOutput
+          $versionMatches = [regex]::Matches($uploadOutput, '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b')
+          if ($versionMatches.Count -lt 1) {
+            throw "Worker version upload returned no parseable version ID. The uploaded version is not deployed and D1 migrations were not run."
+          }
+          $versionId = $versionMatches[$versionMatches.Count - 1].Value
+          "version_id=$versionId" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Apply reviewed migrations to production D1
+        run: |
+          pnpm exec wrangler d1 migrations apply transactra --remote --config infra/cloudflare/wrangler.toml
+          if ($LASTEXITCODE -ne 0) { throw "Production D1 migration failed; Worker deploy stopped." }
+
+      - name: Deploy the preflighted production Worker version
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKERS_DEPLOY_TOKEN }}
+          TRANSACTRA_VERSION_ID: ${{ steps.upload.outputs.version_id }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TRANSACTRA_VERSION_ID)) {
+            throw "No preflighted Worker version ID is available. Refusing deployment."
+          }
+          pnpm exec wrangler versions deploy "$($env:TRANSACTRA_VERSION_ID)@100%" --name transactra-edge --yes --config infra/cloudflare/wrangler.toml
+          if ($LASTEXITCODE -ne 0) { throw "Production Worker version deployment failed." }
+
+      - name: Verify production health and readiness
+        run: |
+          $base = $env:CLOUDFLARE_PRODUCTION_BASE_URL.TrimEnd('/')
+          $health = Invoke-RestMethod -Uri "$base/health" -Method Get -TimeoutSec 25
+          if ($health.ok -ne $true) { throw "Production health check failed after deployment." }
+          $ready = Invoke-RestMethod -Uri "$base/ready" -Method Get -TimeoutSec 25
+          if ($ready.ok -ne $true -or $ready.ready -ne $true) {
+            throw "Production readiness failed after deployment. Invoke the documented rollback procedure."
+          }

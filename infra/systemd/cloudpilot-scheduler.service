@@ -1,0 +1,38 @@
+[Unit]
+Description=CloudPilot durable task and 48-hour project scheduler
+Wants=network-online.target
+After=network-online.target cloudpilot-worker.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cloudpilot
+Group=cloudpilot
+WorkingDirectory=/opt/cloudpilot
+EnvironmentFile=/etc/cloudpilot/cloudpilot.env
+ExecStart=/usr/bin/node dist/apps/scheduler/src/main.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+ProtectProc=invisible
+ProcSubset=pid
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

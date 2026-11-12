@@ -1,0 +1,83 @@
+name: Transactra CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: transactra-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # The self-hosted runner is used only for branches in this private repository.
+    # Fork PRs are deliberately excluded to avoid running untrusted code on it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build, type check and regression tests
+        run: |
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { throw "Build or unit/regression tests failed." }
+
+      - name: Cloudflare migration and inference fail-closed tests
+        run: |
+          pnpm test:cloudflare-nim
+          if ($LASTEXITCODE -ne 0) { throw "Cloudflare safety tests failed." }
+
+      - name: Dependency vulnerability audit
+        run: |
+          pnpm audit --audit-level high
+          if ($LASTEXITCODE -ne 0) { throw "Dependency audit found high/critical vulnerabilities or could not complete." }
+
+      - name: Tracked-file secret scan
+        run: |
+          node scripts/security-gate.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Tracked-file secret scan failed." }
+
+      - name: Validate operational scripts
+        run: |
+          node --check infra/cloudflare/scripts/staging-acceptance.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Staging acceptance script syntax validation failed." }
+          node --check infra/cloudflare/scripts/install-staging-secrets.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Staging secret installer syntax validation failed." }
+          node --check infra/scripts/worker-bootstrap.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Worker bootstrap script syntax validation failed." }
+          $bash = 'C:\Program Files\Git\bin\bash.exe'
+          if (-not (Test-Path $bash)) {
+            throw "Git for Windows bash is required at $bash"
+          }
+          Get-ChildItem 'infra/scripts/*.sh' | ForEach-Object {
+            & $bash -n $_.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Shell syntax validation failed: $($_.Name)"
+            }
+          }

@@ -1,0 +1,143 @@
+name: Transactra Production Readiness Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_free_plan:
+        description: "Owner verified Cloudflare Free plan, no-card status and quota headroom in dashboard."
+        required: true
+        type: choice
+        options: ["NO", "YES"]
+        default: "NO"
+      confirm_backup_restore:
+        description: "Owner completed a production-data backup and isolated restore rehearsal."
+        required: true
+        type: choice
+        options: ["NO", "YES"]
+        default: "NO"
+      confirm_production_protection:
+        description: "Owner verified transactra-production required reviewers, main-only deployment branch and scoped production token."
+        required: true
+        type: choice
+        options: ["NO", "YES"]
+        default: "NO"
+      confirm_telegram_rotation:
+        description: "Owner rotated any previously exposed production Telegram token and stored the replacement as a protected secret."
+        required: true
+        type: choice
+        options: ["NO", "YES"]
+        default: "NO"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: transactra-production-readiness
+  cancel-in-progress: false
+
+jobs:
+  readiness:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, transactra]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: powershell -ExecutionPolicy Bypass -File {0}
+    env:
+      CLOUDFLARE_STAGING_BASE_URL: https://transactra-edge-staging.himaneeshreddyk.workers.dev
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Require owner attestations for external production controls
+        run: |
+          $checks = @{
+            "Cloudflare Free plan and quota headroom" = "${{ inputs.confirm_free_plan }}"
+            "Backup and isolated restore rehearsal" = "${{ inputs.confirm_backup_restore }}"
+            "Production environment protection and scoped token" = "${{ inputs.confirm_production_protection }}"
+            "Production Telegram credential rotation" = "${{ inputs.confirm_telegram_rotation }}"
+          }
+          $failed = @($checks.GetEnumerator() | Where-Object { $_.Value -ne "YES" })
+          if ($failed.Count -gt 0) {
+            $failed | ForEach-Object { Write-Error "Owner attestation missing: $($_.Key)" }
+            throw "Production readiness is blocked. No deployment was attempted."
+          }
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.0.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build, type check and full regression suite
+        run: |
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { throw "Build or regression tests failed." }
+
+      - name: Cloudflare workforce, orchestration and fail-closed acceptance suite
+        run: |
+          pnpm test:cloudflare-nim
+          if ($LASTEXITCODE -ne 0) { throw "Cloudflare workforce/orchestration safety suite failed." }
+
+      - name: Dependency vulnerability audit
+        run: |
+          pnpm audit --audit-level high
+          if ($LASTEXITCODE -ne 0) { throw "Dependency audit failed or could not complete." }
+
+      - name: Tracked-file secret scan
+        run: |
+          node scripts/security-gate.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Tracked-file secret scan failed." }
+
+      - name: Verify production execution enablement and staging resource isolation
+        run: |
+          $prod = Get-Content "infra/cloudflare/wrangler.toml" -Raw
+          $stage = Get-Content "infra/cloudflare/wrangler.staging.toml" -Raw
+          if ($prod -notmatch 'name\s*=\s*"transactra-edge"' -or
+              $prod -notmatch 'database_id\s*=\s*"35047d34-b8f4-4a2a-9321-fb5b5e48e409"' -or
+              $prod -notmatch 'TRANSACTRA_ENV\s*=\s*"production"') {
+            throw "Production resource identity mismatch."
+          }
+          if ($prod -match 'transactra-staging|e7292f55-c90e-4d34-8b77-c97c3e5ec15a' -or
+              $prod -notmatch 'NVIDIA_NIM_EXECUTION_ENABLED\s*=\s*"true"' -or
+              $prod -notmatch 'TRANSACTRA_AGENT_EXECUTION_ENABLED\s*=\s*"true"') {
+            throw "Production config contains staging resources or required execution flags are not enabled."
+          }
+          if ($stage -notmatch 'name\s*=\s*"transactra-edge-staging"' -or
+              $stage -notmatch 'database_id\s*=\s*"e7292f55-c90e-4d34-8b77-c97c3e5ec15a"' -or
+              $stage -match '35047d34-b8f4-4a2a-9321-fb5b5e48e409|queue\s*=\s*"transactra-events"') {
+            throw "Staging config is not isolated from production."
+          }
+          if ($stage -notmatch 'TRANSACTRA_AGENT_EXECUTION_ENABLED\s*=\s*"false"' -or
+              $stage -notmatch 'NVIDIA_NIM_EXECUTION_ENABLED\s*=\s*"false"' -or
+              $stage -match 'NVIDIA_NIM_FREE_TIER_VERIFIED_AT') {
+            throw "Staging agent execution and inference must remain locked until controlled acceptance is explicitly authorized."
+          }
+
+      - name: Verify live staging health and readiness
+        run: |
+          $base = $env:CLOUDFLARE_STAGING_BASE_URL.TrimEnd('/')
+          $uri = [Uri]$base
+          if ($uri.Scheme -ne "https" -or $uri.Host -notmatch "workers\.dev$") {
+            throw "Staging endpoint must be HTTPS on workers.dev."
+          }
+          $health = Invoke-RestMethod -Uri "$base/health" -Method Get -TimeoutSec 25
+          if ($health.ok -ne $true) { throw "Staging /health failed." }
+          $ready = Invoke-RestMethod -Uri "$base/ready" -Method Get -TimeoutSec 25
+          if ($ready.ok -ne $true -or $ready.ready -ne $true) {
+            throw "Staging /ready failed. Production readiness is blocked."
+          }
+
+      - name: Publish readiness boundary
+        run: |
+          Write-Host "PRODUCTION_READINESS_GATE_PASSED"
+          Write-Host "This workflow performs verification only. It does not migrate production D1, deploy a Worker, change a webhook, enable Cron, or unlock agent/inference execution."
