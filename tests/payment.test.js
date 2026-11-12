@@ -1,0 +1,5 @@
+import test from "node:test";import assert from "node:assert/strict";
+function parse(text){const m=text.match(/(?:\b(?:USD|EUR|GBP|INR|CAD|AUD|SGD|JPY)\s*)?[$€£₹]?\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)/i);assert.ok(m);const currency=text.toUpperCase().match(/\b(USD|EUR|GBP|INR|CAD|AUD|SGD|JPY)\b/)?.[1]||(text.includes("₹")?"INR":text.includes("€")?"EUR":text.includes("£")?"GBP":"USD");const recipient=text.match(/\bto\s+([A-Za-z][A-Za-z0-9 &.'-]{0,59}?)(?=\s+(?:for|as|because|with|using)\b|[,.;]|$)/i)?.[1]?.trim();const purpose=text.match(/\bfor\s+(.+?)(?:[.!?]|$)/i)?.[1]?.trim()||"Payment";return{amount:Number(m[1].replaceAll(",","")).toFixed(2),currency,recipient,purpose};}
+test("parses USD amount, recipient and purpose",()=>assert.deepEqual(parse("Pay $24.50 to Alex for dinner"),{amount:"24.50",currency:"USD",recipient:"Alex",purpose:"dinner"}));
+test("detects INR from rupee symbol",()=>assert.equal(parse("Pay ₹850 to Riya for cab fare").currency,"INR"));
+test("does not invent a recipient",()=>assert.equal(parse("Pay $50 for groceries").recipient,undefined));
