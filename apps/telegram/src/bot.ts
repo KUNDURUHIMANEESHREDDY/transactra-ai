@@ -205,7 +205,7 @@ async function main() {
     {command:"ai",description:"Chat with CloudPilot AI"},
     {command:"history",description:"Show recent transactions"},
     {command:"summary",description:"Show captured payment totals"},
-    {command:"cancel",description:"Discard pending payment drafts"},
+    {command:"cancel",description:"How to revoke a pending payment approval"},
     {command:"help",description:"Show available commands"}
   ]});
   const me=await tg<{username:string}>("getMe");
