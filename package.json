@@ -1,1 +1,33 @@
-{"name":"transactra","version":"1.0.0","private":true,"type":"module","engines":{"node":">=22"},"scripts":{"dev":"vite --host 0.0.0.0","dev:api":"tsx watch apps/api/src/server.ts","build":"tsc -p tsconfig.json && vite build","typecheck":"tsc --noEmit -p tsconfig.json","start:api":"node dist/apps/api/src/server.js","preview":"vite preview --host 0.0.0.0","test":"npm run typecheck && node --test tests/payment.test.js"},"dependencies":{"pg":"^8.13.1","react":"^19.1.0","react-dom":"^19.1.0"},"devDependencies":{"@tailwindcss/vite":"^4.1.11","@types/node":"^22.13.4","@types/pg":"^8.11.11","@types/react":"^19.1.8","@types/react-dom":"^19.1.7","@vitejs/plugin-react":"^4.7.0","tailwindcss":"^4.1.11","tsx":"^4.19.2","typescript":"^5.7.3","vite":"^6.3.5"}}
+{
+  "name": "transactra",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "dev:api": "node --env-file=.env --import tsx --watch apps/api/src/server.ts",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start:api": "node --env-file=.env dist/apps/api/src/server.js",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "npm run typecheck && node --test tests/payment.test.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.11",
+    "@types/node": "^22.13.4",
+    "@types/pg": "^8.11.11",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "tailwindcss": "^4.1.11",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.3.5"
+  }
+}
