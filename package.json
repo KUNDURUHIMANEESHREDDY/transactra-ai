@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start:api": "node --env-file=.env dist/apps/api/src/server.js",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "npm run build:api && node --test tests/payment.test.js tests/paypal-oauth.test.js tests/financial-policy.test.js tests/observability.test.js tests/telegram-auth.test.js tests/cloudflare-dashboard-auth.test.mjs"
+    "test": "npm run build:api && node --test tests/payment.test.js tests/payment-capture-recovery.test.js tests/paypal-oauth.test.js tests/financial-policy.test.js tests/observability.test.js tests/telegram-auth.test.js tests/cloudflare-dashboard-auth.test.mjs"
   },
   "dependencies": {
     "@paypal/paypal-server-sdk": "^2.5.0",
