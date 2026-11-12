@@ -240,7 +240,7 @@ export async function processD1NativeApprovedJobs(env, scheduledTime, now) {
         env.DB.prepare("INSERT INTO task_run_events (run_id,event_type,detail,created_at) SELECT id,?,?,? FROM task_runs WHERE task_id=?").bind("run.agent_step_started","Agent "+step.agent+" started "+pending.step_id+".",now,job.task_id)
       ]);
       const priorResults=prior.filter(row=>row.status==="succeeded").map(row=>({step_id:row.step_id,result_text:row.result_text}));
-      const worker=await runAgentWorker(env,step,{objective:job.description,priorResults,taskId:job.task_id,requiresApproval:requiresOwnerStepApproval(step),approvedAction});
+      const worker=await runAgentWorker(env,step,{db:env.DB,taskType:step.task_type,objective:job.description,priorResults,taskId:job.task_id,requiresApproval:requiresOwnerStepApproval(step),approvedAction});
       if(worker.status!=="completed") {
         const stepStatus="needs_review";
         const message=String(worker.error||"Agent step blocked; owner review required and automatic replay withheld").slice(0,500);

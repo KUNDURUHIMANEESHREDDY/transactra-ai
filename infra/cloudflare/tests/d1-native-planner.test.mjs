@@ -28,7 +28,7 @@ function nativeDb(){
      }
      if(sql.includes("SELECT id,task_id,status,expires_at FROM task_approvals WHERE id"))return {id:entry.values[0],task_id:"tg-42",status:"pending",expires_at:"2099-01-01T00:00:00.000Z"};
      if(sql.includes("SELECT * FROM memory_compaction_state"))return {owner_id:entry.values[0],active_generation:1,mem0_paused_month:null,updated_at:"2026-11-10T00:00:00.000Z"};
-     if(sql.includes("sqlite_master"))return {total:19};
+     if(sql.includes("sqlite_master"))return {total:22};
      if(sql.includes("pragma_table_info('telegram_reply_outbox')"))return {total:3};
      if(sql.includes("pragma_table_info"))return {total:4};
      if(sql.includes("SELECT chat_id,thread_id,reply_text,status,business_connection_id")){

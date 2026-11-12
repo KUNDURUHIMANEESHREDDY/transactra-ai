@@ -1,5 +1,6 @@
 import { isNvidiaNimDeveloperAccessConfirmed } from "./nvidia-nim.mjs";
 import { completeCloudPilot } from "./cloudpilot.mjs";
+import { completeRegisteredModel, hasRegisteredTaskModel } from "./model-registry.mjs";
 import { validateToolInput, isSideEffectStep } from "./tool-adapters.mjs";
 
 const AGENTS = new Set([
@@ -57,6 +58,15 @@ export function isAgentToolAllowed(agent, tool) {
 }
 const MAX_STEPS = 8;
 const MAX_DESCRIPTION = 4000;
+const TASK_TYPES = new Set(["general","research","coding","planning","analysis","financial","orchestration"]);
+function defaultTaskType(agent,tool) {
+  if(tool==="web_research"||agent==="researcher"||agent==="product_researcher"||agent==="product-researcher")return "research";
+  if(tool==="repository_read"||tool==="repository_write"||agent==="builder"||agent==="engineering_lead"||agent==="engineering-lead"||agent==="software-engineer")return "coding";
+  if(agent==="finance_officer"||tool==="financial_policy_prepare")return "financial";
+  if(agent==="analyst"||agent==="verifier"||agent==="quality_engineer"||agent==="quality-engineer"||tool==="data_analysis")return "analysis";
+  if(agent==="org_orchestrator"||agent==="org-orchestrator"||agent==="workforce_manager"||agent==="workforce-manager")return "orchestration";
+  return "general";
+}
 
 
 /**
@@ -76,6 +86,7 @@ export function validateApprovedExecutionPlan(plan) {
         || typeof step.acceptance_criteria !== "string" || !step.acceptance_criteria.trim()
         || step.acceptance_criteria.length > 500
         || !["low", "medium", "high"].includes(step.risk)
+        || (step.task_type !== undefined && !TASK_TYPES.has(step.task_type))
         || !Array.isArray(step.depends_on)
         || new Set(step.depends_on).size !== step.depends_on.length
         || step.depends_on.some((dependency) => !Number.isInteger(dependency)
@@ -93,6 +104,7 @@ export function validateApprovedExecutionPlan(plan) {
       description: step.description.trim(),
       acceptance_criteria: step.acceptance_criteria.trim(),
       tool_input: toolInput,
+      task_type: TASK_TYPES.has(step.task_type) ? step.task_type : defaultTaskType(step.agent,step.tool),
       depends_on: [...step.depends_on],
     };
   });
@@ -109,6 +121,7 @@ const SYSTEM_PROMPT = [
   "Convert the owner's objective into a safe, executable, ordered plan.",
   "Use only agent values researcher, analyst, builder, operator, verifier, engineering_lead, quality_engineer, product_researcher, site_reliability_engineer, security_officer, innovation_architect, finance_officer, workforce_manager, org_orchestrator, org-orchestrator, workforce-manager, engineering-lead, software-engineer, quality-engineer, product-researcher, innovation-architect, site-reliability-engineer, security-officer, evolution-engineer.",
   "Use only tool values web_research, data_analysis, repository_read, repository_write, github_issues_read, github_issue_create, github_pr_read, github_actions_read, cloudflare_observe, sandbox_verify, financial_policy_prepare, memory_search, memory_write, telegram_notify, none.",
+  "Set task_type on every step to one of general, research, coding, planning, analysis, financial, orchestration. Use financial only for financial reasoning and Financial Policy Engine preparation; it never authorizes payment execution. Use orchestration for coordinating agent/workforce steps.",
   "Least-privilege role grants: researcher=web_research; product_researcher=web_research,github_issues_read,data_analysis; analyst=web_research,data_analysis,github_issues_read,cloudflare_observe; finance_officer=financial_policy_prepare,data_analysis; builder=repository_read,repository_write,github_pr_read,sandbox_verify; engineering_lead=GitHub issue/PR/Actions, repository read/write, research and sandbox; quality_engineer=repository/PR/Actions read and sandbox; security_officer=Cloudflare/Actions/PR/repository read and research; site_reliability_engineer and operator=Cloudflare/Actions read, research and owner notifications; verifier=read-only verification tools; org_orchestrator/workforce_manager=coordination, analysis and owner notifications; innovation_architect=research, issue creation, repository read/write and sandbox.",
   "The finance_officer is the only role permitted to use financial_policy_prepare. Only builder/software-engineer, engineering_lead/engineering-lead, innovation_architect/innovation-architect and evolution-engineer may write repository files. Only engineering_lead/engineering-lead and innovation_architect/innovation-architect may create GitHub issues. Hyphenated Node catalogue IDs have the same grants as their underscore aliases.",
   "Do not claim tools or agents have executed. This is a proposal only.",
@@ -120,7 +133,7 @@ const SYSTEM_PROMPT = [
   "Use memory_write {key,value} only to persist a durable owner-scoped finding; memory writes are side effects and require a separate owner approval. Only engineering_lead, software-engineer, product_researcher and innovation_architect (and their exact hyphenated Node IDs) may write memory. Use financial_policy_prepare {text} only to prepare a payment challenge through the existing Financial Policy Engine. It does not create an order, capture funds, or bypass PayPal and transaction approvals.",
   "Use github_issue_create {title,body,labels}, repository_write {path,content,message,expected_sha,branch:'main'}, telegram_notify {message}, data_analysis {} or none {} only when the objective requires them and mark side effects high risk.",
   "Cloudflare operations are read-only via cloudflare_observe. Never target staging or production deployment, never write secrets/configuration files, and never put credentials in tool_input.",
-  "Return schema: { title:string, objective:string, steps:[{agent:string,tool:string,tool_input:object,description:string,acceptance_criteria:string,risk:'low'|'medium'|'high',depends_on:number[]}] }.",
+  "Return schema: { title:string, objective:string, steps:[{agent:string,tool:string,tool_input:object,task_type:'general'|'research'|'coding'|'planning'|'analysis'|'financial'|'orchestration',description:string,acceptance_criteria:string,risk:'low'|'medium'|'high',depends_on:number[]}] }.",
 ].join(" ");
 
 function fallbackPlan(objective, reason = "Model planning is disabled; deterministic draft only.") {
@@ -132,6 +145,7 @@ function fallbackPlan(objective, reason = "Model planning is disabled; determini
     description: description.slice(0, 500),
     acceptance_criteria: "Produce a reviewable result that directly addresses this step; report evidence and unresolved risks.",
     risk: "medium",
+    task_type: "analysis",
     depends_on: index ? [index] : [],
     tool_input: {},
     status: "blocked_pending_approval",
@@ -157,6 +171,7 @@ function parseAndValidatePlan(raw, objective) {
         || typeof step.description !== "string" || !step.description.trim()
         || typeof step.acceptance_criteria !== "string" || !step.acceptance_criteria.trim()
         || !["low", "medium", "high"].includes(step.risk)
+        || (step.task_type !== undefined && !TASK_TYPES.has(step.task_type))
         || !Array.isArray(step.depends_on)
         || new Set(step.depends_on).size !== step.depends_on.length
         || step.depends_on.some((n) => !Number.isInteger(n) || n < 1 || n > index)) {
@@ -173,6 +188,7 @@ function parseAndValidatePlan(raw, objective) {
       description: step.description.trim().slice(0, 500),
       acceptance_criteria: step.acceptance_criteria.trim().slice(0, 500),
       risk: step.risk, depends_on: step.depends_on, tool_input: toolInput,
+      task_type: TASK_TYPES.has(step.task_type) ? step.task_type : defaultTaskType(step.agent,step.tool),
       status: "blocked_pending_approval",
     };
   });
@@ -187,10 +203,14 @@ function parseAndValidatePlan(raw, objective) {
 export async function createOrchestratorPlan(env, db, objective, memoryRows = []) {
   const cleanObjective = String(objective || "").trim().slice(0, MAX_DESCRIPTION);
   if (!cleanObjective) throw new Error("Task objective is required");
+  const ownerId=String(env.TELEGRAM_OWNER_ID||"");
+  const orchestrationModelEnabled=await hasRegisteredTaskModel(db,ownerId,"orchestration");
+  const registeredTaskType=orchestrationModelEnabled?"orchestration":"planning";
+  const registeredModelEnabled=orchestrationModelEnabled||await hasRegisteredTaskModel(db,ownerId,"planning");
   const modelEnabled = env.TRANSACTRA_MODEL_ORCHESTRATOR_ENABLED === "true"
     && env.NVIDIA_NIM_PLANNING_ENABLED === "true";
-  if (!modelEnabled) return fallbackPlan(cleanObjective);
-  if (!isNvidiaNimDeveloperAccessConfirmed(env)) return fallbackPlan(cleanObjective, "Model planning is enabled by configuration but NVIDIA Developer Program access verification is not current; inference was not attempted.");
+  if (!registeredModelEnabled && !modelEnabled) return fallbackPlan(cleanObjective);
+  if (!registeredModelEnabled && !isNvidiaNimDeveloperAccessConfirmed(env)) return fallbackPlan(cleanObjective, "Model planning is enabled by configuration but NVIDIA Developer Program access verification is not current; inference was not attempted.");
   const memory = memoryRows.slice(0, 8).map((item) =>
     String(item.memory_key).slice(0, 80) + ": " + String(item.memory_value).slice(0, 240)
   ).join("\n");
@@ -208,13 +228,15 @@ export async function createOrchestratorPlan(env, db, objective, memoryRows = []
   }
   const input = JSON.stringify(inputData);
   try {
-    const completion = await completeCloudPilot(env, {
-      systemPrompt: SYSTEM_PROMPT,
-      input,
-      maxOutputTokens: 512,
-      estimatedCostInr: 0,
-    });
-    return parseAndValidatePlan(completion.output, cleanObjective);
+    const request={systemPrompt:SYSTEM_PROMPT,input,maxOutputTokens:512,estimatedCostInr:0};
+    const completion=registeredModelEnabled
+      ? await completeRegisteredModel(env,db,request,registeredTaskType)
+      : await completeCloudPilot(env,request);
+    const plan=parseAndValidatePlan(completion.output,cleanObjective);
+    plan.model_provider=completion.provider;
+    plan.model=completion.model;
+    plan.model_task_type=registeredModelEnabled?registeredTaskType:"cloudpilot-default";
+    return plan;
   } catch (error) {
     // Invalid model output or provider failure never turns into execution.
     return fallbackPlan(cleanObjective, "Model planning failed closed: " + String(error?.message || "unknown error").slice(0, 240));
@@ -250,9 +272,10 @@ export async function evaluateOrchestratorStep(env, db, input) {
       evidence_required: ["manual verification of the external side effect", "result artifact or provider confirmation"],
     };
   }
-  if (env.TRANSACTRA_AGENT_EXECUTION_ENABLED !== "true"
+  const registeredEvaluatorEnabled=await hasRegisteredTaskModel(db,String(env.TELEGRAM_OWNER_ID||""),"analysis");
+  if (!registeredEvaluatorEnabled && (env.TRANSACTRA_AGENT_EXECUTION_ENABLED !== "true"
       || env.NVIDIA_NIM_EXECUTION_ENABLED !== "true"
-      || !isNvidiaNimDeveloperAccessConfirmed(env)) {
+      || !isNvidiaNimDeveloperAccessConfirmed(env))) {
     return {
       decision: "human_review",
       accepted: false,
@@ -261,12 +284,15 @@ export async function evaluateOrchestratorStep(env, db, input) {
     };
   }
   try {
-    const completion = await completeCloudPilot(env, {
+    const request={
       systemPrompt: "Evaluate task-step evidence against the acceptance criteria. Return only JSON: {decision:'accepted'|'retry'|'replan'|'human_review',rationale:string,evidence_gaps:string[]}. Never claim to have executed tools. Choose accepted only when evidence directly satisfies criteria. High-risk or external side effects always require human review.",
       input: JSON.stringify(evidence),
       maxOutputTokens: 350,
       estimatedCostInr: 0,
-    });
+    };
+    const completion=registeredEvaluatorEnabled
+      ? await completeRegisteredModel(env,db,request,"analysis")
+      : await completeCloudPilot(env,request);
     const value = JSON.parse(completion.output);
     if (!value || !["accepted", "retry", "replan", "human_review"].includes(value.decision)
         || typeof value.rationale !== "string" || !Array.isArray(value.evidence_gaps)

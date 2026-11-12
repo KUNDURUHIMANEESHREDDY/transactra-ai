@@ -6,7 +6,7 @@ workers_dev = true
 [[d1_databases]]
 binding = "DB"
 database_name = "transactra-staging"
-database_id = "e7292f55-c90e-4d34-8b77-c97c3e5ec15a"
+database_id = "312d97f4-47b4-4084-84d5-21c5fe9c5538"
 
 [vars]
 TELEGRAM_BOT_USERNAME = "@TransactraBot"

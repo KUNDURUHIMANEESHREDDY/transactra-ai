@@ -91,6 +91,7 @@ test("staging migration directory contains the complete reviewed sequence", () =
     "0015_orchestrator_step_evidence.sql",
     "0016_model_registry_and_task_routing.sql",
     "0017_telegram_outbox_delivery_leases.sql",
+    "0018_model_runtime_usage.sql",
   ]);
   const runtimeControl = readFileSync(resolve(migrationsDir, "0014_nvidia_runtime_control.sql"), "utf8");
   assert.match(runtimeControl, /CREATE TABLE IF NOT EXISTS nvidia_runtime_control/);
@@ -98,6 +99,13 @@ test("staging migration directory contains the complete reviewed sequence", () =
   const stepEvidence = readFileSync(resolve(migrationsDir, "0015_orchestrator_step_evidence.sql"), "utf8");
   assert.match(stepEvidence, /ALTER TABLE orchestrator_step_runs/);
   assert.match(stepEvidence, /evaluation_json TEXT\s+CHECK \(evaluation_json IS NULL OR json_valid\(evaluation_json\)\)/);
+  const modelRegistry = readFileSync(resolve(migrationsDir, "0016_model_registry_and_task_routing.sql"), "utf8");
+  assert.match(modelRegistry, /CREATE TABLE IF NOT EXISTS model_providers/);
+  assert.match(modelRegistry, /CREATE TABLE IF NOT EXISTS task_model_routes/);
+  const modelUsage = readFileSync(resolve(migrationsDir, "0018_model_runtime_usage.sql"), "utf8");
+  assert.match(modelUsage, /CREATE TABLE IF NOT EXISTS model_usage_daily/);
+  assert.match(modelUsage, /max_requests INTEGER NOT NULL DEFAULT 100/);
+  assert.match(modelUsage, /max_tokens INTEGER NOT NULL DEFAULT 50000/);
 });
 
 test("staging and production Workers persist logs and traces for failure investigation", () => {
@@ -107,3 +115,4 @@ test("staging and production Workers persist logs and traces for failure investi
     assert.match(config, /^\[observability\.traces\]\s*\nenabled = true\s*\nhead_sampling_rate = 1\.0\s*\npersist = true/m, name + " Worker traces must be persisted");
   }
 });
+

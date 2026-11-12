@@ -9,7 +9,7 @@ const json=(value,status=200)=>new Response(JSON.stringify(value),{status,header
 const AI_PROVIDER = "cloudflare-workers-ai";
 const AI_MODEL = "@cf/zai-org/glm-4.7-flash";
 const AI_EXECUTION_ENABLED = false;
-const REQUIRED_D1_TABLES = ["inbound_events", "runtime_heartbeats", "telegram_reply_outbox", "tasks", "task_events", "task_runs", "task_run_events", "agent_memory", "task_memory", "orchestrator_jobs", "orchestrator_events", "orchestrator_step_runs", "orchestrator_step_approvals", "memory_usage_monthly", "memory_compaction_state", "memory_archives", "memory_sync_outbox"];
+const REQUIRED_D1_TABLES = ["inbound_events", "runtime_heartbeats", "telegram_reply_outbox", "tasks", "task_events", "task_runs", "task_run_events", "agent_memory", "task_memory", "orchestrator_jobs", "orchestrator_events", "orchestrator_step_runs", "orchestrator_step_approvals", "memory_usage_monthly", "memory_compaction_state", "memory_archives", "memory_sync_outbox", "model_providers", "task_model_routes", "model_usage_daily"];
 const REQUIRED_D1_TASK_COLUMNS = ["pipeline_task_id", "approval_id", "pipeline_status", "pipeline_synced_at"];
 const REQUIRED_D1_OUTBOX_COLUMNS = ["business_connection_id", "lease_token", "lease_until"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -176,8 +176,8 @@ async function createD1NativeTask(update,env,description,taskId,now){
  const mem0=await searchMem0Memory(env.DB,env,ownerId,description,now);
  const planningMemory=[...(memoryRows?.results||[]),...(mem0.memories||[]).map((item,index)=>({memory_key:"mem0_context_"+index,memory_value:item.memory}))];
  const plan=await createOrchestratorPlan(env,env.DB,description,planningMemory);
- const provider=plan.mode==="model_proposed"?"nvidia-nim":"disabled";
- const model=provider==="nvidia-nim"?String(env.NVIDIA_NIM_MODEL||"configured-model").slice(0,120):"none";
+ const provider=plan.mode==="model_proposed"?String(plan.model_provider||"nvidia-nim"):"disabled";
+ const model=provider!=="disabled"?String(plan.model||env.NVIDIA_NIM_MODEL||"configured-model").slice(0,120):"none";
  await env.DB.prepare("INSERT OR IGNORE INTO execution_plans (id,task_id,plan_version,provider,model,status,plan_json,created_at,updated_at) VALUES (?,?,2,?,?, 'draft',?,?,?)").bind("plan-"+taskId,taskId,provider,model,JSON.stringify(plan),now,now).run();
  await env.DB.prepare("INSERT OR IGNORE INTO task_events (task_id,event_type,detail,created_at) VALUES (?,?,?,?)").bind(taskId,"task.accepted","Task persisted by the D1-native planner; awaiting explicit owner approval.",now).run();
  await env.DB.prepare("INSERT INTO task_run_events (run_id,event_type,detail,created_at) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM task_run_events WHERE run_id=? AND event_type=?)").bind(runId,"run.waiting_approval","No queue dispatch or execution is permitted before owner approval and provider verification.",now,runId,"run.waiting_approval").run();
