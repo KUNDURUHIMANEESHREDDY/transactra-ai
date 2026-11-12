@@ -46,11 +46,14 @@ export function getPayPalConfig(requestHost?: string): PayPalConfig {
   const authBase = isLive ? "https://www.paypal.com" : "https://www.sandbox.paypal.com";
   const restBase = isLive ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
 
-  const host = requestHost || process.env.HOST || "127.0.0.1";
-  const port = process.env.PORT || "8787";
-  const defaultBase = host.includes(":") ? `http://${host}` : `http://${host}:${port}`;
-  const apiBase = (process.env.API_BASE_URL || defaultBase).replace(/\/$/, "");
+  // Never derive the OAuth callback from the incoming Host header.
+  const apiBase = (process.env.API_BASE_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
   const redirectUri = process.env.PAYPAL_REDIRECT_URI || `${apiBase}/api/auth/paypal/callback`;
+  const callback = new URL(redirectUri);
+  const localCallback = callback.hostname === "localhost" || callback.hostname === "127.0.0.1";
+  if (callback.protocol !== "https:" && !(localCallback && callback.protocol === "http:")) {
+    throw new Error("PAYPAL_REDIRECT_URI must use HTTPS (HTTP is allowed only for localhost development).");
+  }
   const frontend = new URL(process.env.FRONTEND_URL || "http://localhost:5173");
   const localFrontend = frontend.hostname === "localhost" || frontend.hostname === "127.0.0.1";
   if (frontend.protocol !== "https:" && !(localFrontend && frontend.protocol === "http:")) {
