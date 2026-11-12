@@ -6,8 +6,6 @@ const backendSharedSecret = process.env.BACKEND_SHARED_SECRET || "";
 const apiBase = (process.env.API_BASE_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const telegramBase = "https://api.telegram.org/bot" + token;
 type Intent = { amount:string; currency:string; recipient:string; purpose:string; confidence:number; source:string };
-type Pending = { intent:Intent; rawPrompt:string; approvalId:string; requiresStepUp:boolean; orderId?:string };
-const pending = new Map<string, Pending>();
 let offset = 0;
 
 async function tg<T=unknown>(method:string, body:Record<string,unknown> = {}):Promise<T> {
@@ -77,8 +75,7 @@ async function handleMessage(message:any) {
     return;
   }
   if (text==="/cancel") {
-    for (const [id,draft] of pending) { if (!draft.orderId) pending.delete(id); }
-    await say(chatId,"Unsubmitted payment drafts cleared. Any existing PayPal orders remain uncaptured; use the PayPal checkout page to cancel them.");
+    await say(chatId,"Payment approvals are stored durably and expire after 10 minutes. Use the Discard button on an individual draft to revoke it. Existing PayPal orders remain uncaptured; cancel them through PayPal checkout.");
     return;
   }
   if (text==="/history") {
@@ -113,12 +110,11 @@ async function handleMessage(message:any) {
   }
   try {
     const data=await api<{approvalId:string;intent:Intent;risk:string;riskScore:number;requiresStepUp:boolean;expiresInSeconds:number}>("/api/payments/prepare","POST",{text},"telegram:"+message.chat.id+":"+message.message_id);
-    const id=randomUUID().slice(0,12);
-    pending.set(id,{intent:data.intent,rawPrompt:text,approvalId:data.approvalId,requiresStepUp:data.requiresStepUp});
+    const approvalId=data.approvalId;
     const p=data.intent;
     await say(chatId,
       "PAYMENT DRAFT ├é┬╖ REVIEW REQUIRED\n\nAmount: "+money(p.amount,p.currency)+"\nRecipient label: "+p.recipient+"\nPurpose: "+p.purpose+"\nCurrency: "+p.currency+"\n\nAI extraction: "+(p.source==="model"?"AI model":"local parser")+"\nFinancial Policy: "+data.risk.toUpperCase()+" RISK · explicit approval required · expires in "+Math.floor(data.expiresInSeconds/60)+" min\n\nThis recipient is a transaction label. PayPal Checkout charges the merchant connected to the configured PayPal app. No money moves until you approve and complete PayPal checkout.",
-      keyboard([[{text:data.requiresStepUp?"Review high-value payment":"Approve & continue",callback_data:data.requiresStepUp?"review:"+id:"approve:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
+      keyboard([[{text:data.requiresStepUp?"Review high-value payment":"Approve & continue",callback_data:data.requiresStepUp?"review:"+approvalId:"approve:"+approvalId},{text:"Discard",callback_data:"discard:"+approvalId}]]));
   } catch(e) { await say(chatId,e instanceof Error?e.message:"I couldn't understand that payment. Try ├óΓé¼┼ôPay $25 to Alex for dinner├óΓé¼┬¥."); }
 }
 async function handleCallback(query:any) {
@@ -169,31 +165,28 @@ async function handleCallback(query:any) {
     } catch(e) { await say(chatId,e instanceof Error?e.message:"PayPal capture failed. Check the checkout approval and try again."); }
     return;
   }
-  const draft=pending.get(id);
-  if (!draft) return void await say(chatId,"This payment draft has expired. Send the request again.");
   if(action==="review"){
-    if(!draft.requiresStepUp)return void await say(chatId,"This payment does not require high-value confirmation.");
-    await say(chatId,"HIGH-VALUE PAYMENT CONFIRMATION\n\nReview the amount, recipient and purpose again. A separate confirmation is required before the normal payment approval.",keyboard([[{text:"I confirm this high-value payment",callback_data:"confirm:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
+    await say(chatId,"HIGH-VALUE PAYMENT CONFIRMATION\n\nReview the amount, recipient and purpose shown in the original payment draft. A separate confirmation is required before the normal payment approval.",keyboard([[{text:"I confirm this high-value payment",callback_data:"confirm:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
     return;
   }
   if(action==="confirm"){
-    if(!draft.requiresStepUp)return void await say(chatId,"This payment does not require high-value confirmation.");
     try{
-      await api("/api/payments/step-up","POST",{approvalId:draft.approvalId});
+      await api("/api/payments/step-up","POST",{approvalId:id});
       await say(chatId,"ADDITIONAL CONFIRMATION RECORDED\n\nNow approve the exact transaction to create its PayPal order.",keyboard([[{text:"Approve & create PayPal order",callback_data:"approve:"+id},{text:"Discard",callback_data:"discard:"+id}]]));
     }catch(e){await say(chatId,e instanceof Error?e.message:"High-value confirmation failed. No PayPal order was created.");}
     return;
   }
-  if (action==="discard") { pending.delete(id); return void await say(chatId,"Payment draft discarded. No PayPal order was created."); }
-  if (action==="approve") {
-    try {
-      const result=await api<{orderId:string;status:string;approveUrl?:string}>("/api/orders","POST",{approvalId:draft.approvalId});
-      if (!result.approveUrl) throw new Error("PayPal did not return an approval link.");
-      pending.delete(id);
-      await say(chatId,
-        "PAYPAL ORDER CREATED - "+result.orderId+"\n\nOpen PayPal checkout and sign in with your Sandbox personal test account. Complete buyer approval, then return to this chat and tap the capture button.\n\nNo capture has happened yet.",
-        keyboard([[{text:"Open PayPal checkout",url:result.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+result.orderId}]]));
-    } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not create the PayPal order."); }
+  if(action==="discard"){
+    try{await api("/api/payments/reject","POST",{approvalId:id});await say(chatId,"Payment approval revoked. No PayPal order was created.");}
+    catch(e){await say(chatId,e instanceof Error?e.message:"Could not revoke this payment approval.");}
+    return;
+  }
+  if(action==="approve"){
+    try{
+      const result=await api<{orderId:string;status:string;approveUrl?:string}>("/api/orders","POST",{approvalId:id});
+      if(!result.approveUrl)throw new Error("PayPal did not return an approval link.");
+      await say(chatId,"PAYPAL ORDER CREATED - "+result.orderId+"\n\nOpen PayPal checkout and sign in with your Sandbox personal test account. Complete buyer approval, then return here and tap the capture button.\n\nNo capture has happened yet.",keyboard([[{text:"Open PayPal checkout",url:result.approveUrl}],[{text:"I have completed PayPal approval",callback_data:"capture:"+result.orderId}]]));
+    }catch(e){await say(chatId,e instanceof Error?e.message:"Could not create the PayPal order.");}
   }
 }
 export async function processTelegramUpdate(update:any) {
