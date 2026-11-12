@@ -54,24 +54,23 @@ async function handleTelegramUpdate(update,env){
  if(m.chat.type!=="private"&&!m.business_connection_id)return;
  const text=typeof m.text==="string"?m.text.trim():"";
  if(!text)return;
- const command=text.match(/^\/(start|help|dashboard|ai)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+ const command=text.match(/^\/(start|help|dashboard)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
  if(command){
   const name=command[1].toLowerCase(),arg=(command[2]||"").trim();
   if(name==="dashboard"||name==="start"){
    const dashboard=String(env.DASHBOARD_URL||"");
-   const payload={chat_id:m.chat.id,text:"Transactra is online. Send me a question or task and I'll respond using CloudPilot AI."};
+   const payload={chat_id:m.chat.id,text:"Transactra is online. Send any message naturally—questions, instructions, plans or tasks—and I will understand your request."};
    if(dashboard)payload.reply_markup={inline_keyboard:[[{text:"Open Transactra Dashboard",web_app:{url:dashboard}}]]};
    if(m.business_connection_id)payload.business_connection_id=m.business_connection_id;
    await tg(env,"sendMessage",payload);return;
   }
   if(name==="help"){
-   await sendText(env,m,"Transactra AI is connected.\n\nSend a message to chat with the model.\n/ai <question> — ask CloudPilot AI\n/dashboard — open the control center\n/help — show this help\n\nFinancial actions are not executed from free-form chat. They remain subject to the Financial Policy Engine and explicit approval.");
+   await sendText(env,m,"Transactra AI is connected.\n\nSend messages naturally. Ask questions, describe a task, or explain what you want done—no special AI command is needed.\n/dashboard — open the control center\n/help — show this help\n\nI will identify your intent and clarify missing details. Actions are only executed through authorized integrations. Financial actions remain subject to the Financial Policy Engine, explicit approval, and verified PayPal checkout.");
    return;
   }
-  if(name==="ai"&&!arg){await sendText(env,m,"Usage: /ai <your question>");return;}
-  if(name==="ai"&&arg){try{await sendText(env,m,await callCloudPilot(env,arg));}catch(e){console.error("cloudpilot_telegram_error",String(e?.message||e));await sendText(env,m,"CloudPilot is temporarily unavailable. Your request was not executed. Please try again shortly.");}return;}
+
  }
- if(text.startsWith("/")){await sendText(env,m,"Unknown command. Send /help for available commands.");return;}
+ if(text.startsWith("/")){await sendText(env,m,"That command is not available. Send /help, or simply describe what you want in a normal message.");return;}
  try{await sendText(env,m,await callCloudPilot(env,text));}
  catch(e){console.error("cloudpilot_telegram_error",String(e?.message||e));await sendText(env,m,"CloudPilot is temporarily unavailable. Your request was not executed. Please try again shortly.");}
 }
@@ -109,7 +108,7 @@ export default {async fetch(req,env){
  }
  if(req.method==="POST"&&url.pathname==="/admin/register-webhook"){
   if(!eq(req.headers.get("x-dashboard-admin-secret")||"",env.TRANSACTRA_AUTH_HEADER_SECRET||""))return json({error:"unauthorized"},401);
-  try{const webhook="https://transactra-telegram.himaneeshreddyk.workers.dev/telegram/webhook";const info=await tg(env,"getWebhookInfo",{});if(info?.url!==webhook)await tg(env,"setWebhook",{url:webhook,secret_token:env.TELEGRAM_WEBHOOK_SECRET,allowed_updates:["message","business_message"],drop_pending_updates:false});await tg(env,"setMyCommands",{commands:[{command:"start",description:"Start Transactra AI"},{command:"ai",description:"Ask CloudPilot AI"},{command:"dashboard",description:"Open the Transactra Control Center"},{command:"help",description:"Show help"}]});return json({ok:true,webhook,model:MODEL});}catch(e){return json({error:"webhook_registration_failed",detail:String(e?.message||e)},502);}
+  try{const webhook="https://transactra-telegram.himaneeshreddyk.workers.dev/telegram/webhook";const info=await tg(env,"getWebhookInfo",{});if(info?.url!==webhook)await tg(env,"setWebhook",{url:webhook,secret_token:env.TELEGRAM_WEBHOOK_SECRET,allowed_updates:["message","business_message"],drop_pending_updates:false});await tg(env,"setMyCommands",{commands:[{command:"start",description:"Start Transactra"},{command:"dashboard",description:"Open the Transactra Control Center"},{command:"help",description:"Show help"}]});return json({ok:true,webhook,model:MODEL});}catch(e){return json({error:"webhook_registration_failed",detail:String(e?.message||e)},502);}
  }
  return json({error:"not_found"},404);
 }};
