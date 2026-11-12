@@ -18,7 +18,7 @@ import {
 } from "./paypal-oauth.js";
 import { getAuthenticatedUser, verifyTelegramWebAppInitData, createAuthenticatedSessionCookie, clearAuthenticatedSessionCookie } from "./request-auth.js";
 import { handleObservabilityRoute } from "./observability.js";
-import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, FINANCIAL_POLICY_VERSION, resolveUserFinancialLimits, verifyPayPalOrder } from "./financial-policy.js";
+import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, FINANCIAL_POLICY_VERSION, resolveUserFinancialLimits, verifyPayPalOrder, verifyPayPalCapturedOrder, verifyFinancialAuditChain } from "./financial-policy.js";
 const port=Number(process.env.PORT||8787),host=process.env.HOST||"127.0.0.1";
 const clientId=process.env.PAYPAL_CLIENT_ID||"",secret=process.env.PAYPAL_CLIENT_SECRET||"";
 const paypalSdkClient = new PayPalClient({ environment: process.env.PAYPAL_ENV === "live" ? PayPalEnvironment.Production : PayPalEnvironment.Sandbox, clientCredentialsAuthCredentials: { oAuthClientId: clientId, oAuthClientSecret: secret }, timeout: 20000 });
@@ -281,6 +281,14 @@ async function route(req:IncomingMessage,res:ServerResponse){
  try{
   if(await handleObservabilityRoute(req,res,url,db))return;
   if(req.method==="GET"&&url.pathname==="/api/health")return send(res,200,{status:"ok",database:Boolean(db),paypalConfigured:Boolean(clientId&&secret),telegramWebhookConfigured:Boolean(process.env.BACKEND_SHARED_SECRET)});
+  if(req.method==="GET"&&url.pathname==="/api/financial-audit/verify"){
+   if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
+   await ensureDb();
+   const userId=telegramUserId(req);
+   const audit=await db!.query("SELECT id,user_id,previous_hash,entry_hash,entry_payload FROM financial_policy_audit WHERE user_id=$1 ORDER BY id ASC",[userId]);
+   const verification=verifyFinancialAuditChain(audit.rows);
+   return send(res,verification.valid?200:409,verification);
+  }
   if(req.method==="GET"&&url.pathname==="/api/auth/session"){
     const userId=getAuthenticatedUser(req);
     if(!userId)return send(res,401,{authenticated:false});
@@ -545,16 +553,19 @@ async function route(req:IncomingMessage,res:ServerResponse){
     if(tx.status==="COMPLETED")return send(res,200,{status:"COMPLETED",alreadyCaptured:true,workflowId:tx.workflow_id||undefined});
     const account=await getConnectedAccountStatus(db!,userId);
     if(!account.connected||!account.account?.verified)return send(res,403,{error:"A verified PayPal account must remain connected to capture this payment."});
-    const claim=await db!.query("UPDATE payment_transactions SET status='CAPTURING',updated_at=NOW() WHERE id=$1 AND status='CREATED' RETURNING id",[tx.id]);
+    const claim=await db!.query("UPDATE payment_transactions SET status='CAPTURING',updated_at=NOW() WHERE id=$1 AND status IN ('CREATED','CAPTURE_PENDING') RETURNING id",[tx.id]);
     if(!claim.rowCount)return send(res,409,{error:"This order is already being captured or is not eligible for capture."});
     try{
      const order=await getPayPalOrder(orderId);
-     const orderCheck=verifyPayPalOrder({...(order.id?{id:order.id}:{}),...(order.status?{status:order.status}:{}),...(order.payer?.payerId?{payer:{payer_id:order.payer.payerId}}:{}),...(order.purchaseUnits?{purchase_units:order.purchaseUnits.map(unit=>({...((unit.referenceId)?{reference_id:unit.referenceId}:{}),...(unit.amount?{amount:{currency_code:unit.amount.currencyCode,value:unit.amount.value}}:{})}))}: {})},{orderId,payerId:account.account.payerId,transactionId:tx.id,amount:tx.amount,currency:tx.currency.trim()});
+     const expected={orderId,payerId:account.account.payerId,transactionId:tx.id,amount:tx.amount,currency:tx.currency.trim()};
+     const orderCheck=order.status==="COMPLETED"
+      ?verifyPayPalCapturedOrder({...(order.id?{id:order.id}:{}),...(order.status?{status:order.status}:{}),...(order.payer?.payerId?{payer:{payer_id:order.payer.payerId}}:{}),...(order.purchaseUnits?{purchase_units:order.purchaseUnits.map(unit=>({...((unit.referenceId)?{reference_id:unit.referenceId}:{}),...(unit.amount?{amount:{currency_code:unit.amount.currencyCode,value:unit.amount.value}}:{}),...(unit.payments?.captures?{payments:{captures:unit.payments.captures.map(capture=>({...((capture.id)?{id:capture.id}:{}),...(capture.status?{status:capture.status}:{}),...(capture.amount?{amount:{currency_code:capture.amount.currencyCode,value:capture.amount.value}}:{})}))}}:{})}))}: {})},expected)
+      :verifyPayPalOrder({...(order.id?{id:order.id}:{}),...(order.status?{status:order.status}:{}),...(order.payer?.payerId?{payer:{payer_id:order.payer.payerId}}:{}),...(order.purchaseUnits?{purchase_units:order.purchaseUnits.map(unit=>({...((unit.referenceId)?{reference_id:unit.referenceId}:{}),...(unit.amount?{amount:{currency_code:unit.amount.currencyCode,value:unit.amount.value}}:{})}))}: {})},expected);
      if(!orderCheck.allowed){
-      const reason=orderCheck.reason;
+      const reason=orderCheck.reason,completedOrder=order.status==="COMPLETED";
       const audit=await db!.connect();
-      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status='DENIED',updated_at=NOW() WHERE id=$1",[tx.id]);await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:false,reason,policyVersion:FINANCIAL_POLICY_VERSION,risk:"high",riskScore:100,payloadHash:paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose})});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
-      return send(res,403,{error:reason});
+      try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status=$1,updated_at=NOW() WHERE id=$2",[completedOrder?"CAPTURE_PENDING":"DENIED",tx.id]);await appendFinancialAudit(audit,{userId,eventType:completedOrder?"PAYMENT_CAPTURE_RECOVERY_REVIEW":"PAYMENT_CAPTURE",allowed:false,reason:completedOrder?"PayPal reports a completed order but capture verification needs manual review: "+reason:reason,policyVersion:FINANCIAL_POLICY_VERSION,risk:"high",riskScore:100,payloadHash:paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose})});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
+      return send(res,completedOrder?202:403,completedOrder?{status:"CAPTURE_PENDING",manualReviewRequired:true,error:reason}:{error:reason});
      }
      const limits=await loadUserFinancialLimits(db!,userId),hash=paymentPayloadHash({userId,amount:tx.amount,currency:tx.currency.trim(),recipient:tx.recipient,purpose:tx.purpose});
      const exposure=await paymentExposure(db!,userId,tx.currency.trim(),tx.recipient,tx.amount,tx.purpose,tx.id,hash);
@@ -568,13 +579,13 @@ async function route(req:IncomingMessage,res:ServerResponse){
       try{await audit.query("BEGIN");await audit.query("UPDATE payment_transactions SET status='DENIED',updated_at=NOW() WHERE id=$1",[tx.id]);await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:false,reason,policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});await audit.query("COMMIT");}catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
       return send(res,409,{error:reason});
      }
-     const captured=await capturePayPalOrder(orderId,tx.id+"-capture");
+     const recovered=order.status==="COMPLETED",captured=recovered?order:await capturePayPalOrder(orderId,tx.id+"-capture");
      const status=String(captured.status||"UNKNOWN"),capture=captured.purchaseUnits?.[0]?.payments?.captures?.[0],captureId=capture?.id||null,completed=status==="COMPLETED"&&capture?.status==="COMPLETED";
      const audit=await db!.connect();let workflowComplete:boolean|undefined;
      try{
       await audit.query("BEGIN");
       await audit.query("UPDATE payment_transactions SET status=$1,paypal_capture_id=$2,updated_at=NOW() WHERE id=$3",[completed?"COMPLETED":"CAPTURE_PENDING",captureId,tx.id]);
-      await appendFinancialAudit(audit,{userId,eventType:"PAYMENT_CAPTURE",allowed:completed,reason:completed?"PayPal confirmed the capture.":"PayPal capture is pending or incomplete.",policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
+      await appendFinancialAudit(audit,{userId,eventType:recovered?"PAYMENT_CAPTURE_RECOVERED":"PAYMENT_CAPTURE",allowed:completed,reason:recovered?"Recovered a previously completed PayPal capture after an interrupted API response.":completed?"PayPal confirmed the capture.":"PayPal capture is pending or incomplete.",policyVersion:decision.policyVersion,risk:decision.risk,riskScore:decision.riskScore,payloadHash:hash});
       if(tx.workflow_id&&tx.workflow_step_id){
        await audit.query("UPDATE payment_workflow_steps SET status=$1,updated_at=NOW() WHERE id=$2",[completed?"COMPLETED":"PAYMENT_PENDING",tx.workflow_step_id]);
        if(completed){
@@ -585,7 +596,7 @@ async function route(req:IncomingMessage,res:ServerResponse){
       }
       await audit.query("COMMIT");
      }catch(e){await audit.query("ROLLBACK");throw e;}finally{audit.release();}
-     return send(res,completed?200:202,{status:completed?"COMPLETED":"CAPTURE_PENDING",captureId,workflowId:tx.workflow_id||undefined,workflowComplete});
+     return send(res,completed?200:202,{status:completed?"COMPLETED":"CAPTURE_PENDING",captureId,recovered:recovered||undefined,workflowId:tx.workflow_id||undefined,workflowComplete});
     }catch(e){await db!.query("UPDATE payment_transactions SET status='CREATED',updated_at=NOW() WHERE id=$1 AND status='CAPTURING'",[tx.id]);throw e;}
    }
    return send(res,404,{error:"Route not found."});

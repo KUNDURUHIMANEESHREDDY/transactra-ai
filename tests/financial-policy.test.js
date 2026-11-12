@@ -1,6 +1,7 @@
 ﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, resolveUserFinancialLimits, verifyPayPalOrder } from "../dist/apps/api/src/financial-policy.js";
+import { createHash } from "node:crypto";
+import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, resolveUserFinancialLimits, verifyPayPalOrder, verifyPayPalCapturedOrder, verifyFinancialAuditChain } from "../dist/apps/api/src/financial-policy.js";
 
 const candidate = { userId: "telegram:123", amount: "25.00", currency: "USD", recipient: "Alex", purpose: "Dinner" };
 const limits = { maxTransactionAmount: 1000, maxDailyAmount: 2500, maxDailyTransactions: 10, highValueThreshold: 500 };
@@ -104,6 +105,45 @@ test("PayPal capture verification binds payer, amount, currency, reference and o
   assert.equal(verifyPayPalOrder(order, expected).allowed, true);
   assert.match(verifyPayPalOrder({ ...order, payer: { payer_id: "OTHER" } }, expected).reason, /buyer identity/);
   assert.match(verifyPayPalOrder({ ...order, purchase_units: [{ ...order.purchase_units[0], amount: { currency_code: "USD", value: "250.00" } }] }, expected).reason, /amount or currency/);
+});
+
+test("recovers a completed PayPal capture after the API lost the original response", () => {
+  const order = {
+    id: "ORDER123",
+    status: "COMPLETED",
+    payer: { payer_id: "PAYER123" },
+    purchase_units: [{
+      reference_id: "TX123",
+      amount: { currency_code: "USD", value: "25.00" },
+      payments: { captures: [{ id: "CAPTURE123", status: "COMPLETED", amount: { currency_code: "USD", value: "25.00" } }] }
+    }]
+  };
+  const expected = { orderId: "ORDER123", payerId: "PAYER123", transactionId: "TX123", amount: "25.00", currency: "USD" };
+  assert.deepEqual(verifyPayPalCapturedOrder(order, expected), {
+    allowed: true,
+    reason: "Previously completed PayPal capture verified for safe recovery.",
+    captureId: "CAPTURE123"
+  });
+  assert.match(verifyPayPalCapturedOrder({ ...order, payer: { payer_id: "OTHER" } }, expected).reason, /buyer identity/);
+  assert.match(verifyPayPalCapturedOrder({ ...order, purchase_units: [{ ...order.purchase_units[0], payments: { captures: [{ id: "CAPTURE123", status: "PENDING", amount: { currency_code: "USD", value: "25.00" } }] } }] }, expected).reason, /completed capture/);
+  assert.match(verifyPayPalCapturedOrder({ ...order, purchase_units: [{ ...order.purchase_units[0], payments: { captures: [{ id: "CAPTURE123", status: "COMPLETED", amount: { currency_code: "USD", value: "250.00" } }] } }] }, expected).reason, /capture amount or currency/);
+});
+
+test("verifies financial audit hash-chain continuity and detects payload tampering", () => {
+  const makeEntry = (id, previousHash, eventType) => {
+    const payload = JSON.stringify({ userId: "telegram:123", eventType, allowed: true, reason: "test", policyVersion: "test", risk: "low", riskScore: 10, payloadHash: null, previousHash, createdAt: "2026-11-12T00:00:00.000Z" });
+    return { id, user_id: "telegram:123", previous_hash: previousHash, entry_hash: createHash("sha256").update(payload).digest("hex"), entry_payload: payload };
+  };
+  const first = makeEntry(1, "GENESIS", "PAYMENT_PREPARE");
+  const second = makeEntry(2, first.entry_hash, "PAYMENT_EXECUTE");
+  assert.deepEqual(verifyFinancialAuditChain([first, second]), { valid: true, verifiedEntries: 2, reason: "Financial audit hash chain is intact." });
+  const tampered = { ...second, entry_payload: second.entry_payload.replace('"test"', '"tampered"') };
+  const failed = verifyFinancialAuditChain([first, tampered]);
+  assert.equal(failed.valid, false);
+  assert.equal(failed.brokenEntryId, 2);
+  assert.match(failed.reason, /entry hash/);
+  const brokenLink = { ...second, previous_hash: "wrong-parent" };
+  assert.match(verifyFinancialAuditChain([first, brokenLink]).reason, /previous-hash link/);
 });
 
 test("blocks high-confidence suspicious activity before execution", () => {

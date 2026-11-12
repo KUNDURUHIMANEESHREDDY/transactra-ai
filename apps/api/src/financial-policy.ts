@@ -66,6 +66,34 @@ export function verifyPayPalOrder(order:{id?:string;status?:string;payer?:{payer
   if(unit.amount?.currency_code!==expected.currency||unit.amount?.value!==expected.amount)return {allowed:false,reason:"PayPal order amount or currency does not match the approved transaction."};
   return {allowed:true,reason:"PayPal order identity and transaction details verified."};
 }
+export function verifyPayPalCapturedOrder(order:{id?:string;status?:string;payer?:{payer_id?:string};purchase_units?:Array<{reference_id?:string;amount?:{currency_code?:string;value?:string};payments?:{captures?:Array<{id?:string;status?:string;amount?:{currency_code?:string;value?:string}}>}}>},expected:{orderId:string;payerId:string;transactionId:string;amount:string;currency:string}):{allowed:boolean;reason:string;captureId?:string}{
+  if(order.id!==expected.orderId)return {allowed:false,reason:"PayPal order ID does not match the transaction."};
+  if(order.status!=="COMPLETED")return {allowed:false,reason:"PayPal order is not in COMPLETED state."};
+  if(order.payer?.payer_id!==expected.payerId)return {allowed:false,reason:"PayPal buyer identity does not match the connected account."};
+  if(!order.purchase_units||order.purchase_units.length!==1)return {allowed:false,reason:"PayPal order purchase-unit structure is invalid."};
+  const unit=order.purchase_units[0];
+  if(unit?.reference_id!==expected.transactionId)return {allowed:false,reason:"PayPal order reference does not match the approved transaction."};
+  if(unit.amount?.currency_code!==expected.currency||unit.amount?.value!==expected.amount)return {allowed:false,reason:"PayPal order amount or currency does not match the approved transaction."};
+  const captures=unit.payments?.captures||[];
+  if(captures.length!==1||captures[0]?.status!=="COMPLETED"||!captures[0]?.id)return {allowed:false,reason:"PayPal order is completed without one verifiable completed capture."};
+  if(captures[0].amount&&(captures[0].amount.currency_code!==expected.currency||captures[0].amount.value!==expected.amount))return {allowed:false,reason:"PayPal capture amount or currency does not match the approved transaction."};
+  return {allowed:true,reason:"Previously completed PayPal capture verified for safe recovery.",captureId:captures[0].id};
+}
+
+export function verifyFinancialAuditChain(entries:Array<{id:string|number;user_id:string;previous_hash:string;entry_hash:string;entry_payload:string}>):{valid:boolean;verifiedEntries:number;brokenEntryId?:string|number;reason:string}{
+  let previousHash="GENESIS";
+  for(const entry of entries){
+    if(entry.previous_hash!==previousHash)return {valid:false,verifiedEntries:entries.indexOf(entry),brokenEntryId:entry.id,reason:"Financial audit previous-hash link is invalid."};
+    let payload:Record<string,unknown>;
+    try{payload=JSON.parse(entry.entry_payload) as Record<string,unknown>;}catch{return {valid:false,verifiedEntries:entries.indexOf(entry),brokenEntryId:entry.id,reason:"Financial audit payload is not valid JSON."};}
+    if(payload.userId!==entry.user_id||payload.previousHash!==previousHash)return {valid:false,verifiedEntries:entries.indexOf(entry),brokenEntryId:entry.id,reason:"Financial audit payload identity or previous-hash link is invalid."};
+    const computedHash=createHash("sha256").update(entry.entry_payload).digest("hex");
+    if(computedHash!==entry.entry_hash)return {valid:false,verifiedEntries:entries.indexOf(entry),brokenEntryId:entry.id,reason:"Financial audit entry hash does not match its canonical payload."};
+    previousHash=entry.entry_hash;
+  }
+  return {valid:true,verifiedEntries:entries.length,reason:"Financial audit hash chain is intact."};
+}
+
 export function evaluatePaymentPolicy(candidate:PaymentCandidate,exposure:PaymentExposure,limits=getFinancialPolicyLimits()):PaymentPolicyDecision{
   const deny=(reason:string):PaymentPolicyDecision=>({allowed:false,approvalRequired:true,requiresStepUp:false,riskScore:100,risk:"high",reason,policyVersion:FINANCIAL_POLICY_VERSION});
   const userId=String(candidate.userId||"").trim(),currency=String(candidate.currency||"").trim().toUpperCase();
