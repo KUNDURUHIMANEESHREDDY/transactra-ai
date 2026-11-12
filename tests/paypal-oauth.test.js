@@ -184,3 +184,32 @@ test("PayPal OAuth callback requires the launched browser session and consumes s
   assert.match(sqlCalls[0].sql, /session_hash = \$2/);
   assert.match(sqlCalls[0].sql, /launch_used_at IS NOT NULL/);
 });
+
+test("Production PayPal OAuth refuses Sandbox configuration", () => {
+  const previous = {
+    nodeEnv: process.env.NODE_ENV,
+    paypalEnv: process.env.PAYPAL_ENV,
+    redirect: process.env.PAYPAL_REDIRECT_URI,
+    frontend: process.env.FRONTEND_URL,
+    api: process.env.API_BASE_URL
+  };
+  process.env.NODE_ENV = "production";
+  process.env.PAYPAL_ENV = "sandbox";
+  process.env.PAYPAL_REDIRECT_URI = "https://api.example.test/api/auth/paypal/callback";
+  process.env.FRONTEND_URL = "https://app.example.test";
+  process.env.API_BASE_URL = "https://api.example.test";
+  try {
+    assert.throws(() => getPayPalConfig(), /PAYPAL_ENV=live/);
+  } finally {
+    for (const [key, value] of Object.entries({
+      NODE_ENV: previous.nodeEnv,
+      PAYPAL_ENV: previous.paypalEnv,
+      PAYPAL_REDIRECT_URI: previous.redirect,
+      FRONTEND_URL: previous.frontend,
+      API_BASE_URL: previous.api
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
