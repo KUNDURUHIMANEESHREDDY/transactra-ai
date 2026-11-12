@@ -55,7 +55,7 @@ async function sendPayPalConnect(env,m){
  if(secret.length<32||!/^\d{1,20}$/.test(owner))throw Error("paypal_connect_not_configured");
  const userId="telegram:"+owner,timestamp=String(Math.floor(Date.now()/1000));
  const signature=hex(await mac(enc.encode(secret),userId+"."+timestamp));
- const response=await fetch(apiBase+"/api/auth/paypal/connect",{method:"GET",headers:{"x-transactra-user-id":userId,"x-transactra-auth-timestamp":timestamp,"x-transactra-auth-signature":signature,accept:"application/json"},redirect:"follow",signal:AbortSignal.timeout(15000)});
+ const response=await fetch(apiBase+"/api/auth/paypal/connect",{method:"GET",headers:{"x-transactra-user-id":userId,"x-transactra-owner-id":owner,"x-transactra-auth-timestamp":timestamp,"x-transactra-auth-signature":signature,accept:"application/json"},redirect:"follow",signal:AbortSignal.timeout(15000)});
  const data=await response.json().catch(()=>null);
  if(!response.ok||typeof data?.authorizeUrl!=="string")throw Error(typeof data?.error==="string"?data.error:"paypal_connect_failed");
  const payload={chat_id:m.chat.id,text:"CONNECT PAYPAL · "+String(data.environment||"sandbox").toUpperCase()+"\n\nOpen PayPal's official authorization page. Sign in using your PayPal email or mobile number, then approve the requested access. Never send your password or one-time code in Telegram.",disable_web_page_preview:true,reply_markup:{inline_keyboard:[[{text:"Authorize PayPal",url:data.authorizeUrl}]]}};
