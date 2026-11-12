@@ -21,6 +21,7 @@ import { handleObservabilityRoute } from "./observability.js";
 import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, FINANCIAL_POLICY_VERSION, resolveUserFinancialLimits, verifyPayPalOrder, verifyPayPalCapturedOrder, verifyFinancialAuditChain } from "./financial-policy.js";
 const port=Number(process.env.PORT||8787),host=process.env.HOST||"127.0.0.1";
 const clientId=process.env.PAYPAL_CLIENT_ID||"",secret=process.env.PAYPAL_CLIENT_SECRET||"";
+if(process.env.NODE_ENV==="production"&&process.env.PAYPAL_ENV!=="live")throw new Error("Production requires PAYPAL_ENV=live. Sandbox PayPal endpoints are blocked in production.");
 const paypalSdkClient = new PayPalClient({ environment: process.env.PAYPAL_ENV === "live" ? PayPalEnvironment.Production : PayPalEnvironment.Sandbox, clientCredentialsAuthCredentials: { oAuthClientId: clientId, oAuthClientSecret: secret }, timeout: 20000 });
 const paypalOrders = new OrdersController(paypalSdkClient);
 const db=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL}):null;
