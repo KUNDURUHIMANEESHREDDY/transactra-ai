@@ -489,7 +489,21 @@ async function route(req:IncomingMessage,res:ServerResponse){
    await ensureDb();const q=await db!.query("SELECT id,recipient,purpose,amount::text,currency,status,paypal_order_id,created_at FROM payment_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50",[telegramUserId(req)]);
    return send(res,200,{transactions:q.rows});
   }
-   if(req.method==="POST"&&url.pathname==="/api/payments/step-up"){
+   if(req.method==="POST"&&url.pathname==="/api/payments/reject"){
+   if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
+   await ensureDb();const userId=telegramUserId(req),b=await read(req),approvalId=String(b.approvalId||"");
+   if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(approvalId))return send(res,400,{error:"A valid payment approval is required."});
+   const client=await db!.connect();
+   try{
+    await client.query("BEGIN");
+    const q=await client.query("SELECT payload_hash,policy_version,risk_level,risk_score FROM payment_approval_challenges WHERE id=$1 AND user_id=$2 AND status='PENDING' AND expires_at>NOW() FOR UPDATE",[approvalId,userId]);
+    if(!q.rowCount){await client.query("ROLLBACK");return send(res,409,{error:"This payment approval is no longer pending or has expired."});}
+    await client.query("UPDATE payment_approval_challenges SET status='REJECTED' WHERE id=$1 AND user_id=$2 AND status='PENDING'",[approvalId,userId]);
+    await appendFinancialAudit(client,{userId,eventType:"PAYMENT_REJECT",allowed:false,reason:"Owner explicitly revoked the pending transaction approval; no PayPal order was created.",policyVersion:q.rows[0].policy_version,risk:q.rows[0].risk_level,riskScore:Number(q.rows[0].risk_score),payloadHash:q.rows[0].payload_hash});
+    await client.query("COMMIT");return send(res,200,{rejected:true});
+   }catch(e){await client.query("ROLLBACK");throw e;}finally{client.release();}
+  }
+  if(req.method==="POST"&&url.pathname==="/api/payments/step-up"){
     if(!requireBotOwner(req))return send(res,401,{error:"Authenticated Telegram session required."});
     await ensureDb();const userId=telegramUserId(req),b=await read(req),approvalId=String(b.approvalId||"");
     if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(approvalId))return send(res,400,{error:"A valid payment approval is required."});
