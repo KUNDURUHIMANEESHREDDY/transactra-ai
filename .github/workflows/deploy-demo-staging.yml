@@ -1,5 +1,6 @@
 name: Transactra Demo Staging Deploy
 # Deploy only when the commit message contains [deploy-demo-staging].
+# This workflow updates the staging Worker only; it never touches production resources.
 
 on:
   push:
