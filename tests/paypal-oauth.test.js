@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encryptToken, decryptToken } from "../dist/apps/api/src/token-encryption.js";
-import { getPayPalConfig, createOAuthState } from "../dist/apps/api/src/paypal-oauth.js";
+import { getPayPalConfig, createOAuthState, validateAndConsumeState } from "../dist/apps/api/src/paypal-oauth.js";
 
-process.env.TOKEN_ENCRYPTION_SECRET ||= "test-only-secret-that-is-at-least-32-bytes";
+// Isolated test-only key; production must supply its own secret.
+process.env.TOKEN_ENCRYPTION_SECRET = "test-only-token-encryption-secret-32-bytes-minimum";
 
 test("Token Encryption: AES-256-GCM roundtrip encryption and decryption", () => {
   const secretToken = "A21AAI_MOCK_PAYPAL_ACCESS_TOKEN_XYZ1234567890";
@@ -149,11 +150,37 @@ test("OAuth State: binds authorization URL to the initiating Telegram user", asy
   process.env.PAYPAL_CLIENT_SECRET = "test_client_secret";
   let inserted;
   const fakeDb = { query: async (sql, values) => { inserted = { sql, values }; return { rowCount: 1, rows: [] }; } };
-  const result = await createOAuthState(fakeDb, "123456789");
-  assert.equal(inserted.values[1], "123456789");
+  const sessionHash = "b".repeat(64);
+  const result = await createOAuthState(fakeDb, "telegram:123456789", sessionHash);
+  assert.equal(inserted.values[1], "telegram:123456789");
+  assert.equal(inserted.values[2], sessionHash);
   assert.match(inserted.sql, /user_id/);
+  assert.match(inserted.sql, /session_hash/);
   assert.match(result.authorizeUrl, /^https:\/\/www\.sandbox\.paypal\.com\/signin\/authorize\?/);
   assert.ok(new URL(result.authorizeUrl).searchParams.get("state"));
   assert.equal(new URL(result.authorizeUrl).searchParams.has("redirect_url"), false);
-  await assert.rejects(() => createOAuthState(fakeDb, "default_user"), /valid Telegram user ID/);
+  await assert.rejects(() => createOAuthState(fakeDb, "default_user", sessionHash), /valid Telegram user ID/);
+});
+
+test("PayPal OAuth callback requires the launched browser session and consumes state once", async () => {
+  let consumed = false;
+  const sqlCalls = [];
+  const fakeDb = {
+    async query(sql, params) {
+      sqlCalls.push({ sql, params });
+      if (consumed) return { rowCount: 0, rows: [] };
+      consumed = true;
+      return { rowCount: 1, rows: [{ user_id: "telegram:123", redirect_url: "https://app.example.test" }] };
+    }
+  };
+  const state = "a".repeat(64);
+  const sessionHash = "b".repeat(64);
+  const first = await validateAndConsumeState(fakeDb, state, sessionHash);
+  const replay = await validateAndConsumeState(fakeDb, state, sessionHash);
+  assert.equal(first.valid, true);
+  assert.equal(first.userId, "telegram:123");
+  assert.equal(first.redirectUrl, "https://app.example.test");
+  assert.equal(replay.valid, false);
+  assert.match(sqlCalls[0].sql, /session_hash = \$2/);
+  assert.match(sqlCalls[0].sql, /launch_used_at IS NOT NULL/);
 });
