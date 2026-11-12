@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 const token = process.env.TELEGRAM_BOT_TOKEN || "";
 const ownerId = process.env.TELEGRAM_OWNER_ID || "";
+const backendSharedSecret = process.env.BACKEND_SHARED_SECRET || "";
 const apiBase = (process.env.API_BASE_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const telegramBase = "https://api.telegram.org/bot" + token;
 type Intent = { amount:string; currency:string; recipient:string; purpose:string; confidence:number; source:string };
@@ -20,7 +21,7 @@ async function tg<T=unknown>(method:string, body:Record<string,unknown> = {}):Pr
 }
 async function api<T=Record<string,unknown>>(path:string, method="GET", body?:unknown):Promise<T> {
   const response = await fetch(apiBase + path, {
-    method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId},
+    method, headers:{"Content-Type":"application/json","x-transactra-owner-id":ownerId,"x-transactra-edge-secret":backendSharedSecret},
     ...(body===undefined?{}:{body:JSON.stringify(body)}), signal:AbortSignal.timeout(20000)
   });
   const data = await response.json() as T & {error?:string};
@@ -47,8 +48,15 @@ async function handleMessage(message:any) {
     await say(chatId,"Welcome to Transactra. Your Telegram payment desk is ready.\n\nSend one payment or a multi-step plan separated by semicolons, new lines, or “then”. Use /history, /summary and /help. Every plan requires owner approval, and each PayPal checkout requires buyer approval.");
     return;
   }
+  if (text.toLowerCase()==="connect paypal" || text==="/connect" || text==="/paypal") {
+    try {
+      const result=await api<{authorizeUrl:string;environment:string}>("/api/auth/paypal/connect");
+      await say(chatId,"CONNECT PAYPAL · "+result.environment.toUpperCase()+"\\n\\nOpen PayPal’s official authorization page, sign in with your PayPal email or mobile number, and approve the requested access. Transactra never asks for your PayPal password or one-time code in Telegram.",keyboard([[{text:"Authorize PayPal",url:result.authorizeUrl}]]));
+    } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not start PayPal authorization. Check the server configuration."); }
+    return;
+  }
   if (text==="/help") {
-    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2–8 step plan separated by semicolons, new lines, or “then”. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
+    await say(chatId,"TRANSACTRA - TELEGRAM COMMANDS\n\nSend one payment, or a 2–8 step plan separated by semicolons, new lines, or “then”. Example: Pay $25 to Alex for dinner; then pay $60 to Sam for hosting.\n/connect - securely connect your PayPal account\\n/history - recent transactions\n/summary - captured payment totals\n/cancel - clear unsubmitted drafts\n/help - this message\n\nReview each draft, approve it, complete PayPal Sandbox checkout, then return here to capture. Never send PayPal credentials in Telegram.");
     return;
   }
   if (text==="/cancel") {
@@ -155,7 +163,7 @@ export async function processTelegramUpdate(update:any) {
 }
 
 async function main() {
-  if (!token || !ownerId) throw new Error("Set TELEGRAM_BOT_TOKEN and TELEGRAM_OWNER_ID in .env before starting the Transactra Telegram bot.");
+  if (!token || !ownerId || !backendSharedSecret) throw new Error("Set TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID and BACKEND_SHARED_SECRET in .env before starting the Transactra Telegram bot.");
   if (process.env.TELEGRAM_CLEAR_WEBHOOK==="true") await tg("deleteWebhook",{drop_pending_updates:false});
   const webhook=await tg<{url?:string}>("getWebhookInfo");
   if (webhook.url) throw new Error("A Telegram webhook is already configured. Set TELEGRAM_CLEAR_WEBHOOK=true once to switch this bot to polling, then restart it.");
