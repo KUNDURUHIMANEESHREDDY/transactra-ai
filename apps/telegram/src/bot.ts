@@ -45,10 +45,10 @@ async function handleMessage(message:any) {
   const chatId=message.chat.id, text=String(message.text||"").trim();
   if (!text) return;
   if (text==="/start" || text.startsWith("/start ")) {
-    await say(chatId,"Welcome to Transactra. Your Telegram payment desk is ready.\n\nSend one payment or a multi-step plan separated by semicolons, new lines, or “then”. Use /history, /summary and /help. Every plan requires owner approval, and each PayPal checkout requires buyer approval.");
+    await say(chatId,"Welcome to Transactra. Your Telegram payment desk is ready.\n\nSend one payment or a multi-step plan separated by semicolons, new lines, or “then”. Send “connect paypal” to link your account. Use /history, /summary and /help. Every plan requires owner approval, and each PayPal checkout requires buyer approval.");
     return;
   }
-  if (text.toLowerCase()==="connect paypal" || text==="/connect" || text==="/paypal") {
+  if ((text.toLowerCase()==="connect paypal" || text.toLowerCase()==="connect to paypal") || text==="/connect" || text==="/paypal") {
     try {
       const result=await api<{authorizeUrl:string;environment:string}>("/api/auth/paypal/connect");
       await say(chatId,"CONNECT PAYPAL · "+result.environment.toUpperCase()+"\n\nOpen PayPal’s official authorization page, sign in with your PayPal email or mobile number, and approve the requested access. Transactra never asks for your PayPal password or one-time code in Telegram.",keyboard([[{text:"Authorize PayPal",url:result.authorizeUrl}]]));
