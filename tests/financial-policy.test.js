@@ -1,6 +1,6 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash } from "../dist/apps/api/src/financial-policy.js";
+import { assertPaymentEnvironment, evaluatePaymentPolicy, getFinancialPolicyLimits, paymentPayloadHash, resolveUserFinancialLimits, verifyPayPalOrder } from "../dist/apps/api/src/financial-policy.js";
 
 const candidate = { userId: "telegram:123", amount: "25.00", currency: "USD", recipient: "Alex", purpose: "Dinner" };
 const limits = { maxTransactionAmount: 1000, maxDailyAmount: 2500, maxDailyTransactions: 10, highValueThreshold: 500 };
@@ -87,3 +87,28 @@ test("blocks exact duplicate transactions and elevated suspicious activity", () 
   assert.equal(suspicious.risk, "high");
   assert.ok(suspicious.riskScore >= 60);
 });
+
+
+test("user-specific limits can tighten but never loosen global ceilings", () => {
+  const base = { maxTransactionAmount: 1000, maxDailyAmount: 2500, maxDailyTransactions: 10, highValueThreshold: 500 };
+  const result = resolveUserFinancialLimits(base, { enabled: true, max_transaction_amount: 2000, max_daily_amount: 9000, max_daily_transactions: 50, high_value_threshold: 900 });
+  assert.deepEqual(result, base);
+  const tightened = resolveUserFinancialLimits(base, { enabled: true, max_transaction_amount: 100, max_daily_amount: 200, max_daily_transactions: 2, high_value_threshold: 50 });
+  assert.deepEqual(tightened, { maxTransactionAmount: 100, maxDailyAmount: 200, maxDailyTransactions: 2, highValueThreshold: 50 });
+  assert.throws(() => resolveUserFinancialLimits(base, { enabled: false, max_transaction_amount: 100, max_daily_amount: 200, max_daily_transactions: 2, high_value_threshold: 50 }), /disabled/);
+});
+
+test("PayPal capture verification binds payer, amount, currency, reference and order ID", () => {
+  const order = { id: "ORDER123", status: "APPROVED", payer: { payer_id: "PAYER123" }, purchase_units: [{ reference_id: "TX123", amount: { currency_code: "USD", value: "25.00" } }] };
+  const expected = { orderId: "ORDER123", payerId: "PAYER123", transactionId: "TX123", amount: "25.00", currency: "USD" };
+  assert.equal(verifyPayPalOrder(order, expected).allowed, true);
+  assert.match(verifyPayPalOrder({ ...order, payer: { payer_id: "OTHER" } }, expected).reason, /buyer identity/);
+  assert.match(verifyPayPalOrder({ ...order, purchase_units: [{ ...order.purchase_units[0], amount: { currency_code: "USD", value: "250.00" } }] }, expected).reason, /amount or currency/);
+});
+
+test("blocks high-confidence suspicious activity before execution", () => {
+  const result = evaluatePaymentPolicy({ ...candidate, amount: "900" }, { dailySpent: 1500, dailyCount: 2, recentAttempts: 7, failedAttempts: 3, newRecipient: true }, { ...limits, highValueThreshold: 500 });
+  assert.equal(result.allowed, false);
+  assert.match(result.reason, /automatic block threshold/);
+});
+

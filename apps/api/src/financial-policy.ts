@@ -43,6 +43,29 @@ export function paymentPayloadHash(payment:{userId:string;amount:string;currency
   const currency=String(payment.currency).trim().toUpperCase(),canonicalAmount=normalizeAmount(payment.amount,currency)||String(payment.amount);
   return createHash("sha256").update(JSON.stringify({userId:payment.userId,amount:canonicalAmount,currency,recipient:payment.recipient,purpose:payment.purpose})).digest("hex");
 }
+
+export function resolveUserFinancialLimits(base:FinancialPolicyLimits,row:{enabled:boolean;max_transaction_amount:string|number;max_daily_amount:string|number;max_daily_transactions:string|number;high_value_threshold:string|number}|null):FinancialPolicyLimits{
+  if(!row)return base;
+  if(!row.enabled)throw new Error("Financial policy is disabled for this user; all payments are blocked.");
+  const requested={maxTransactionAmount:Number(row.max_transaction_amount),maxDailyAmount:Number(row.max_daily_amount),maxDailyTransactions:Number(row.max_daily_transactions),highValueThreshold:Number(row.high_value_threshold)};
+  if(!Number.isFinite(requested.maxTransactionAmount)||requested.maxTransactionAmount<=0||!Number.isFinite(requested.maxDailyAmount)||requested.maxDailyAmount<=0||!Number.isSafeInteger(requested.maxDailyTransactions)||requested.maxDailyTransactions<=0||!Number.isFinite(requested.highValueThreshold)||requested.highValueThreshold<=0)throw new Error("Stored user financial policy is invalid; payments are blocked.");
+  return {
+    maxTransactionAmount:Math.min(base.maxTransactionAmount,requested.maxTransactionAmount),
+    maxDailyAmount:Math.min(base.maxDailyAmount,requested.maxDailyAmount),
+    maxDailyTransactions:Math.min(base.maxDailyTransactions,requested.maxDailyTransactions),
+    highValueThreshold:Math.min(base.highValueThreshold,requested.highValueThreshold)
+  };
+}
+export function verifyPayPalOrder(order:{id?:string;status?:string;payer?:{payer_id?:string};purchase_units?:Array<{reference_id?:string;amount?:{currency_code?:string;value?:string}} >},expected:{orderId:string;payerId:string;transactionId:string;amount:string;currency:string}):{allowed:boolean;reason:string}{
+  if(order.id!==expected.orderId)return {allowed:false,reason:"PayPal order ID does not match the transaction."};
+  if(order.status!=="APPROVED")return {allowed:false,reason:"PayPal order is not in APPROVED state."};
+  if(order.payer?.payer_id!==expected.payerId)return {allowed:false,reason:"PayPal buyer identity does not match the connected account."};
+  if(!order.purchase_units||order.purchase_units.length!==1)return {allowed:false,reason:"PayPal order purchase-unit structure is invalid."};
+  const unit=order.purchase_units[0];
+  if(unit?.reference_id!==expected.transactionId)return {allowed:false,reason:"PayPal order reference does not match the approved transaction."};
+  if(unit.amount?.currency_code!==expected.currency||unit.amount?.value!==expected.amount)return {allowed:false,reason:"PayPal order amount or currency does not match the approved transaction."};
+  return {allowed:true,reason:"PayPal order identity and transaction details verified."};
+}
 export function evaluatePaymentPolicy(candidate:PaymentCandidate,exposure:PaymentExposure,limits=getFinancialPolicyLimits()):PaymentPolicyDecision{
   const deny=(reason:string):PaymentPolicyDecision=>({allowed:false,approvalRequired:true,requiresStepUp:false,riskScore:100,risk:"high",reason,policyVersion:FINANCIAL_POLICY_VERSION});
   const userId=String(candidate.userId||"").trim(),currency=String(candidate.currency||"").trim().toUpperCase();
@@ -66,6 +89,7 @@ export function evaluatePaymentPolicy(candidate:PaymentCandidate,exposure:Paymen
   if(exposure.newRecipient)riskScore+=15;
   if((exposure.failedAttempts??0)>=2)riskScore+=25;
   if((exposure.recentAttempts??0)>=5)riskScore+=20;
+  if(riskScore>=85)return deny("Suspicious activity score reached the automatic block threshold; manual review is required.");
   const requiresStepUp=numericAmount>=limits.highValueThreshold||riskScore>=60;
   const risk: "low"|"medium"|"high"=riskScore>=60?"high":riskScore>=30||requiresStepUp?"medium":"low";
   return {allowed:true,approvalRequired:true,requiresStepUp,riskScore:Math.min(100,riskScore),risk,reason:requiresStepUp?"Policy checks passed; an additional transaction-bound confirmation is required before execution.":"Policy checks passed. A one-time, transaction-bound Telegram approval is still mandatory.",policyVersion:FINANCIAL_POLICY_VERSION,normalized:{userId,amount,currency,recipient,purpose}};

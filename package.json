@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "dev:api": "node --env-file=.env --import tsx --watch apps/api/src/server.ts",
@@ -16,6 +18,7 @@
     "test": "npm run build:api && node --test tests/payment.test.js tests/paypal-oauth.test.js tests/financial-policy.test.js tests/observability.test.js tests/telegram-auth.test.js"
   },
   "dependencies": {
+    "@paypal/paypal-server-sdk": "^2.5.0",
     "pg": "^8.13.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

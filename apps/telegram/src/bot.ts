@@ -104,7 +104,7 @@ async function handleMessage(message:any) {
   if (text.startsWith("/")) { await say(chatId,"Unknown command. Send /help to see what I can do."); return; }
   if (/[;\n]|\bthen\b/i.test(text)) {
     try {
-      const plan=await api<{workflowId:string;steps:Array<{sequence:number;amount:string;currency:string;recipient:string;purpose:string;source:string}>;totalAmountByCurrency:Record<string,number>}>("/api/workflows/plan","POST",{text});
+      const plan=await api<{workflowId:string;steps:Array<{sequence:number;amount:string;currency:string;recipient:string;purpose:string;source:string}>;totalAmountByCurrency:Record<string,number>}>("/api/workflows/plan","POST",{text},"telegram:"+message.chat.id+":"+message.message_id);
       const lines=plan.steps.map(s=>s.sequence+". "+money(s.amount,s.currency)+" ΓåÆ "+s.recipient+" ("+s.purpose+")");
       const totals=Object.entries(plan.totalAmountByCurrency).map(([c,v])=>money(v.toFixed(2),c)).join(", ");
       await say(chatId,"AGENT PAYMENT PLAN ┬╖ "+plan.steps.length+" STEPS\n\n"+lines.join("\n")+"\n\nTotal planned: "+totals+"\n\nAll steps are stored as a draft. Approving authorizes Transactra to create the first PayPal order; each checkout still requires your PayPal buyer approval before capture.",keyboard([[{text:"Approve entire plan",callback_data:"workflowapprove:"+plan.workflowId},{text:"Reject plan",callback_data:"workflowreject:"+plan.workflowId}]]));
@@ -133,9 +133,18 @@ async function handleCallback(query:any) {
   }
   if (action==="workflowapprove") {
     try {
-      const result=await api<{workflowId:string;step:number;totalSteps:number;orderId:string;approveUrl:string;amount:string;currency:string;recipient:string;purpose:string}>("/api/workflows/"+id+"/approve","POST",{});
-      await say(chatId,"PLAN APPROVED ┬╖ STEP "+result.step+"/"+result.totalSteps+"\n\n"+money(result.amount,result.currency)+" ┬╖ "+result.recipient+"\n"+result.purpose+"\n\nOpen PayPal, complete buyer approval, then return here to capture this step. Later steps remain queued until this capture is verified.",keyboard([[{text:"Open PayPal checkout",url:result.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+result.orderId}]]));
+      const result=await api<{workflowId:string;step:number;totalSteps:number;orderId?:string;approveUrl?:string;amount:string;currency:string;recipient:string;purpose:string;requiresStepUp?:boolean}>("/api/workflows/"+id+"/approve","POST",{});
+      if(result.requiresStepUp)await say(chatId,"HIGH-VALUE WORKFLOW STEP\n\n"+money(result.amount,result.currency)+" · "+result.recipient+"\n"+result.purpose+"\n\nThis step requires a separate confirmation before a PayPal order can be created.",keyboard([[{text:"Confirm high-value step",callback_data:"workflowstepup:"+id}]]));
+      else if(result.approveUrl&&result.orderId)await say(chatId,"PLAN APPROVED · STEP "+result.step+"/"+result.totalSteps+"\n\n"+money(result.amount,result.currency)+" · "+result.recipient+"\n"+result.purpose+"\n\nOpen PayPal, complete buyer approval, then return here to capture this step. Later steps remain queued until this capture is verified.",keyboard([[{text:"Open PayPal checkout",url:result.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+result.orderId}]]));
     } catch(e) { await say(chatId,e instanceof Error?e.message:"Could not approve the payment plan."); }
+    return;
+  }
+  if(action==="workflowstepup"){
+    try{
+      const result=await api<{workflowId:string;step:number;totalSteps:number;orderId?:string;approveUrl?:string;amount?:string;currency?:string;recipient?:string;purpose?:string;requiresStepUp?:boolean}>("/api/workflows/"+id+"/step-up","POST",{});
+      if(result.requiresStepUp)await say(chatId,"This workflow step still requires additional review. No PayPal order was created.");
+      else if(result.approveUrl&&result.orderId)await say(chatId,"HIGH-VALUE STEP CONFIRMED · "+result.step+"/"+result.totalSteps+"\n\n"+money(String(result.amount),String(result.currency))+" · "+result.recipient+"\n"+result.purpose+"\n\nOpen PayPal to approve this payment.",keyboard([[{text:"Open PayPal checkout",url:result.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+result.orderId}]]));
+    }catch(e){await say(chatId,e instanceof Error?e.message:"Could not confirm this high-value workflow step.");}
     return;
   }
   if (action==="capture") {
@@ -148,8 +157,9 @@ async function handleCallback(query:any) {
         if(result.workflowId){
           if(result.workflowComplete)await say(chatId,"AGENT WORKFLOW COMPLETE\n\nAll approved payment steps have been captured and verified by PayPal.");
           else{
-            const next=await api<{step?:number;totalSteps?:number;orderId?:string;approveUrl?:string;amount?:string;currency?:string;recipient?:string;purpose?:string;complete?:boolean}>("/api/workflows/"+result.workflowId+"/next","POST",{});
-            if(next.approveUrl&&next.orderId)await say(chatId,"NEXT APPROVED STEP ┬╖ "+next.step+"/"+next.totalSteps+"\n\n"+money(String(next.amount),String(next.currency))+" ┬╖ "+next.recipient+"\n"+next.purpose+"\n\nOpen PayPal to approve this payment. No capture has happened yet.",keyboard([[{text:"Open PayPal checkout",url:next.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+next.orderId}]]));
+            const next=await api<{step?:number;totalSteps?:number;orderId?:string;approveUrl?:string;amount?:string;currency?:string;recipient?:string;purpose?:string;complete?:boolean;requiresStepUp?:boolean}>("/api/workflows/"+result.workflowId+"/next","POST",{});
+            if(next.requiresStepUp)await say(chatId,"NEXT WORKFLOW STEP REQUIRES CONFIRMATION · "+next.step+"/"+next.totalSteps+"\n\n"+money(String(next.amount),String(next.currency))+" · "+next.recipient+"\n"+next.purpose,keyboard([[{text:"Confirm high-value step",callback_data:"workflowstepup:"+result.workflowId}]]));
+            else if(next.approveUrl&&next.orderId)await say(chatId,"NEXT APPROVED STEP · "+next.step+"/"+next.totalSteps+"\n\n"+money(String(next.amount),String(next.currency))+" · "+next.recipient+"\n"+next.purpose+"\n\nOpen PayPal to approve this payment. No capture has happened yet.",keyboard([[{text:"Open PayPal checkout",url:next.approveUrl}],[{text:"I've completed PayPal approval",callback_data:"capture:"+next.orderId}]]));
             else if(next.complete)await say(chatId,"AGENT WORKFLOW COMPLETE\n\nAll approved payment steps have been processed.");
           }
         }
