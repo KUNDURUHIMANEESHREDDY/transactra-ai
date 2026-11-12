@@ -45,3 +45,21 @@ test("demo task persists isolated demo task events and returns a disclosed scrip
   assert.match(reply, /pending your approved model catalogue/);
   assert.match(reply, /No live research, model inference, or external action was performed/);
 });
+
+
+test("demo reply succeeds when task service and D1 are unavailable", async () => {
+  const reply = await runDemoTask({}, { update_id: 124 }, DEMO_TASK_PROMPT);
+  assert.match(reply, /TRANSACTRA · MULTI-AGENT DEMO/);
+  assert.match(reply, /DEMO MODE — SCRIPTED EXECUTION/);
+  assert.match(reply, /No live research, model inference, or external action was performed/);
+});
+
+test("demo reply succeeds when optional D1 telemetry writes fail", async () => {
+  const db = {
+    prepare() {
+      return { bind() { return { run: async () => { throw new Error("D1 unavailable"); } }; } };
+    }
+  };
+  const reply = await runDemoTask({ DB: db, TELEGRAM_OWNER_ID: "8593447241" }, { update_id: 125 }, DEMO_TASK_PROMPT);
+  assert.match(reply, /EXECUTIVE SUMMARY/);
+});
