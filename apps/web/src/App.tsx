@@ -76,7 +76,7 @@ export default function App(){
       {connected?(
        <button className="disconnect-btn" onClick={disconnectAccount} disabled={busy}>Disconnect account</button>
       ):(
-       <a className="paypal-btn" href="/api/auth/paypal/connect?redirect=1">
+       <a className="paypal-btn" aria-label="Connect PayPal through secure OAuth authorization" href="/api/auth/paypal/connect?redirect=1">
         <svg viewBox="0 0 24 24"><path d="M7.076 21.337H2.47a.641.641 0 0 1-.633-.74L4.944 3.72a.774.774 0 0 1 .763-.645h7.108c3.21 0 5.485 1.572 4.965 4.887-.456 2.91-2.482 4.606-5.467 4.606h-2.07l-1.025 6.51a.64.64 0 0 1-.633.535l-.509.724z"/></svg>
         Connect PayPal
        </a>
