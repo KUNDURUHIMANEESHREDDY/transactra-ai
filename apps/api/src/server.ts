@@ -106,10 +106,8 @@ async function ensureWorkflowSchema(){
  await db!.query("ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS workflow_step_id UUID REFERENCES payment_workflow_steps(id)");
 }
 function requireBotOwner(req:IncomingMessage){
- const expected=String(process.env.BACKEND_SHARED_SECRET||""),supplied=String(req.headers["x-transactra-edge-secret"]||"");
- const owner=String(process.env.TELEGRAM_OWNER_ID||""),user=String(req.headers["x-transactra-owner-id"]||"");
- const a=Buffer.from(expected),b=Buffer.from(supplied);
- return Boolean(expected.length>=32&&owner&&/^\d{1,20}$/.test(owner)&&user===owner&&supplied&&a.length===b.length&&timingSafeEqual(a,b));
+ const owner=String(process.env.TELEGRAM_OWNER_ID||"");
+ return owner.length>0 && getAuthenticatedUser(req)==="telegram:"+owner;
 }
 function telegramUserId(req:IncomingMessage){return "telegram:"+String(req.headers["x-transactra-owner-id"]||"");}
 async function loadUserFinancialLimits(client:any,userId:string){
