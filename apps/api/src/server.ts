@@ -56,12 +56,12 @@ function requireBotOwner(req:IncomingMessage){
  const expected=process.env.BACKEND_SHARED_SECRET||"",supplied=String(req.headers["x-transactra-edge-secret"]||"");
  const owner=String(process.env.TELEGRAM_OWNER_ID||""),user=String(req.headers["x-transactra-owner-id"]||"");
  const a=Buffer.from(expected),b=Buffer.from(supplied);
- return Boolean(owner&&/^\\d{1,20}$/.test(owner)&&user===owner&&expected&&supplied&&a.length===b.length&&timingSafeEqual(a,b));
+ return Boolean(owner&&/^\d{1,20}$/.test(owner)&&user===owner&&expected&&supplied&&a.length===b.length&&timingSafeEqual(a,b));
 }
 function telegramUserId(req:IncomingMessage){return String(req.headers["x-transactra-owner-id"]||"");}
 async function notifyTelegramUser(userId:string,message:string){
  const botToken=process.env.TELEGRAM_BOT_TOKEN;
- if(!botToken||!/^\\d{1,20}$/.test(userId))return;
+ if(!botToken||!/^\d{1,20}$/.test(userId))return;
  try{
   const response=await fetch("https://api.telegram.org/bot"+botToken+"/sendMessage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:userId,text:message}),signal:AbortSignal.timeout(10000)});
   if(!response.ok)console.error("Telegram OAuth notification failed:",response.status);
