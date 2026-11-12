@@ -335,8 +335,12 @@ async function route(req:IncomingMessage,res:ServerResponse){
     const launch = new URL("/api/auth/paypal/start", getPayPalConfig().redirectUri);
     launch.searchParams.set("state", state);
     launch.searchParams.set("session", browserSession);
-    res.writeHead(302, { Location: launch.toString(), "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
-    return res.end();
+    const authorizeUrl = launch.toString();
+    if (url.searchParams.get("redirect") === "1") {
+      res.writeHead(302, { Location: authorizeUrl, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+      return res.end();
+    }
+    return send(res, 200, { authorizeUrl, provider: "paypal", environment: getPayPalConfig().env });
   }
 
   if (req.method === "GET" && url.pathname === "/api/auth/paypal/start") {
